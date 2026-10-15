@@ -1,0 +1,45 @@
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+credentials*.json
+token*.json
+
+# Browser automation state (logged-in sessions for LinkedIn / Naukri)
+.browser-profiles/
+playwright/.auth/
+
+# Local data
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / React
+node_modules/
+dist/
+build/
+.vite/
+
+# Claude Code personal overrides
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Personal data: never in git (the server gets the resume with `python -m app.tools.push ... resume`)
+profile/CANDIDATE_PROFILE.md
+profile/resume/
+prompts/PROMPTS.md

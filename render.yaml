@@ -1,0 +1,38 @@
+# Render Blueprint for the Job-apply backend (docs/DEPLOYMENT.md). The frontend deploys on Vercel.
+services:
+  - type: web
+    name: jobhunt-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    # 2 GB of memory: the LinkedIn and Naukri browsers can run at the same time. A persistent disk
+    # needs a paid plan; the free plan also sleeps, which stops the scan schedule.
+    plan: standard
+    region: singapore
+    numInstances: 1 # never more: the scan schedule runs inside the app
+    healthCheckPath: /api/health
+    buildFilter:
+      paths:
+        - backend/**
+    disk:
+      name: jobhunt-data
+      mountPath: /data
+      sizeGB: 2
+    envVars:
+      # The app login. Pick a long password; set it in the Render dashboard.
+      - key: APP_PASSWORD
+        sync: false
+      - key: AUTH_SECRET
+        generateValue: true
+      # The Vercel address of the frontend, e.g. https://jobhunt.vercel.app
+      - key: CORS_ORIGINS
+        sync: false
+      # Gmail for the hiring-post emails (an app password, never the account password).
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_APP_PASSWORD
+        sync: false
+      - key: SMTP_FROM_NAME
+        sync: false
+      - key: TZ
+        value: Asia/Kolkata

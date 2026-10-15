@@ -1,0 +1,13 @@
+# Never in the image: secrets, local data and logins, caches, tests.
+.env
+.env.*
+!.env.example
+.venv/
+data/
+.browser-profiles/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+tests/
+Dockerfile
+.dockerignore

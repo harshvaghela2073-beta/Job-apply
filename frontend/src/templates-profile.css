@@ -1,0 +1,386 @@
+/* ==========================================================================
+   Template Library, Profile page, collapsible panels.
+   Components import this file, so it loads before index.css: it uses its own class
+   names (cl-, tl-, sp-, pf-, tp-) instead of overriding index.css rules.
+   ========================================================================== */
+
+/* ---------- Icons and icon buttons ---------- */
+.tp-icon {
+  display: block;
+  flex-shrink: 0;
+}
+.tp-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color 0.12s,
+    color 0.12s,
+    opacity 0.12s;
+}
+.tp-icon-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.tp-icon-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.tp-icon-btn-danger:hover:not(:disabled) {
+  background: var(--critical-weak);
+  color: var(--critical);
+}
+
+/* ---------- Collapsible panel ---------- */
+.cl.panel {
+  padding: 0;
+}
+.cl-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-height: 48px;
+  padding: 8px 8px 8px 14px;
+  cursor: pointer;
+}
+.cl-title {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.cl-count {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.cl-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.cl-toggle {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.cl-actions + .cl-toggle {
+  margin-left: 0;
+}
+.cl-head:hover .cl-toggle,
+.cl-toggle:focus-visible {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.cl-toggle .tp-icon {
+  transition: transform 0.18s ease;
+}
+.cl-open .cl-toggle .tp-icon {
+  transform: rotate(180deg);
+}
+.cl-body {
+  padding: 2px 14px 14px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cl-toggle .tp-icon {
+    transition: none;
+  }
+}
+
+/* ---------- Template Library ---------- */
+.tl-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.tl-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin-top: 8px;
+}
+
+/* ---------- Job search priority ---------- */
+.sp-groups {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(0, 2.2fr) minmax(180px, 1fr);
+  gap: 16px 28px;
+}
+.sp-group {
+  min-width: 0;
+}
+.sp-fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.sp-group-title {
+  display: block;
+  margin: 0 0 8px;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.sp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sp-chips li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+/* A small chevron between items shows the order without numbers (drawn, so it isn't read out). */
+.sp-chips li:not(:last-child)::after {
+  content: '';
+  width: 5px;
+  height: 5px;
+  margin-right: 2px;
+  border-top: 1.5px solid var(--muted);
+  border-right: 1.5px solid var(--muted);
+  transform: rotate(45deg);
+}
+.sp-edit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+.sp-edit-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.sp-edit-item input {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-right: 4px;
+}
+.sp-add {
+  display: flex;
+  gap: 6px;
+}
+.sp-add input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sp-add input[aria-invalid='true'] {
+  border-color: var(--critical-strong);
+}
+.sp-error {
+  margin-top: 6px;
+  color: var(--critical);
+  font-size: 12px;
+}
+.sp-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+.sp-saved {
+  font-size: 12px;
+  color: var(--muted);
+}
+@media (max-width: 760px) {
+  .sp-groups {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- Profile: the name, then every detail in one centred card ---------- */
+.pf-page {
+  position: relative;
+}
+.pf-reload {
+  position: absolute;
+  top: 14px;
+  right: var(--gutter);
+  font-size: 17px;
+}
+.pf {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  max-width: 640px;
+  margin: 6px auto 0;
+}
+.pf-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding-top: 6px;
+  text-align: center;
+}
+.pf-head .avatar-lg {
+  width: 72px;
+  height: 72px;
+  font-size: 26px;
+}
+/* Left padding the width of the edit button keeps the name optically centred. */
+.pf-name-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding-left: 34px;
+}
+.pf-name {
+  min-width: 0;
+  font-size: 28px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+.pf-name-editor {
+  width: 100%;
+  max-width: 420px;
+}
+.pf-name-editor input {
+  text-align: center;
+  font-size: 18px;
+  font-weight: 600;
+}
+.pf-name-editor .pf-editor-actions {
+  justify-content: center;
+}
+.pf-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-pop);
+}
+.pf-section {
+  margin: 0;
+  padding: 16px 22px 8px;
+}
+.pf-section + .pf-section {
+  border-top: 1px solid var(--border);
+}
+.pf-section-title {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.pf-rows {
+  margin: 0;
+}
+.pf-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 32%) minmax(0, 1fr);
+  gap: 2px 16px;
+  align-items: baseline;
+  padding: 9px 0;
+}
+.pf-row + .pf-row {
+  border-top: 1px solid var(--border);
+}
+.pf-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+.pf-value {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+}
+.pf-value-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 500;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Link colour is the text colour in both themes, so links get an underline cue. */
+.pf-value a {
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 2px;
+}
+.pf-value a:hover {
+  text-decoration-color: currentColor;
+}
+.pf-edit {
+  width: 28px;
+  height: 28px;
+  margin: -5px -6px -5px 0;
+  opacity: 0.4;
+}
+.pf-name-row .pf-edit {
+  margin: 0;
+}
+.pf-row:hover .pf-edit,
+.pf-name-row:hover .pf-edit,
+.pf-edit:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .pf-edit {
+    opacity: 0.75;
+  }
+}
+.pf-editor {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.pf-editor .inline-error {
+  margin-top: 0;
+}
+.pf-editor-actions {
+  display: flex;
+  gap: 6px;
+}
+@media (max-width: 560px) {
+  .pf-section {
+    padding: 14px 16px 6px;
+  }
+  .pf-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pf-name {
+    font-size: 24px;
+  }
+}

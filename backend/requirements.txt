@@ -1,0 +1,14 @@
+# Runtime
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+sqlmodel==0.0.48
+pydantic-settings==2.15.0
+# Browser automation (uses the installed Google Chrome by default) and HTML parsing
+playwright==1.63.0
+beautifulsoup4==4.15.0
+# Decrypting cookies imported from the user's Chrome (AES)
+cryptography==50.0.2
+
+# Tests
+pytest==9.1.1
+httpx==0.28.1
