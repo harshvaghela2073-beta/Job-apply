@@ -142,13 +142,28 @@ def facts(**values) -> LinkedInJobFacts:
         (facts(salary="₹4,00,000/yr - ₹6,00,000/yr"), "Salary ₹4,00,000/yr - ₹6,00,000/yr is below your current 12 LPA"),
         (facts(salary="₹15L/yr"), None),
         (facts(description="Angular and .NET Core front ends; JavaScript a must."), "None of your skills"),
-        (facts(title="Golang Developer", description="Build APIs."), None),  # the title counts too
+        # At least 2 of your skills (2026-10-15); the title counts too.
+        (facts(title="Golang Developer", description="Build APIs on Kafka."), None),
+        (facts(title="Golang Developer", description="Build APIs."), "Only 1 of your skills (Golang) is in the job's title or description; at least 2 are needed."),
+        (facts(description="Build Java services."), "Only 1 of your skills (Java)"),
+        (facts(description="We go live in May: Java services."), "Only 1 of your skills (Java)"),  # "go" isn't Golang
+        (facts(description="Java and Go microservices."), None),
         (facts(description=""), None),  # no description read: not skipped on skills
         (facts(level="Internship"), "Internship posting."),
-        (facts(description="Freshers welcome, 0-1 years, Java training provided."), "Fresher / internship-style"),
+        (facts(description="Freshers welcome, 0-1 years, Java and Spring Boot training provided."), "Fresher / internship-style"),
         (facts(company="Seacross Recruitment Services"), "Posted by a consultancy (Seacross Recruitment Services)"),
         (facts(company="Confidential"), "The company is hidden"),
         (facts(company="Talentica", industry="Staffing and Recruiting"), "Posted by a consultancy (Talentica is in Staffing and Recruiting)"),
+        # Job fit (2026-10-15): another stack, senior titles.
+        (facts(title="Full Stack Developer - .Net / React.js"), 'Another stack: the title says ".Net" and names none of your skills.'),
+        (facts(title="Android SDE 2"), 'Another stack: the title says "Android"'),
+        (facts(title="Software Support Engineer"), 'Another stack: the title says "Support"'),
+        (facts(title="Java Full Stack Developer (Spring Boot + Angular)"), None),
+        (facts(title="Senior Java Developer"), 'Too senior: the title says "Senior".'),
+        (facts(title="Technical Lead / Senior Full Stack"), 'Too senior: the title says "Lead".'),
+        (facts(title="SDE III"), 'Too senior: the title says "SDE III".'),
+        (facts(title="SDE 2"), None),
+        (facts(title="Software Engineer II"), None),
     ],
 )
 def test_skip_reason(job, reason_start):
@@ -157,6 +172,19 @@ def test_skip_reason(job, reason_start):
         assert reason is None
     else:
         assert reason is not None and reason.startswith(reason_start)
+
+
+RULES_WITH_SKIP_LIST = ApplyRules(min_salary_lpa=12.0, skills=MY_SKILLS, skip_companies=("Jobgether", "Scoutit"))
+
+
+def test_skip_list_and_the_stored_job():
+    assert skip_reason(RULES_WITH_SKIP_LIST, facts(company="Jobgether")) == "Jobgether is on your skip list."
+    stored = StoredJob(url=JOB_URL, company="Scoutit Technologies", title="Senior Java Developer")
+    assert skip_reason(RULES_WITH_SKIP_LIST, facts(company=""), stored) == "Scoutit Technologies is on your skip list."
+    # The page's title is missing: the stored one is used.
+    assert skip_reason(RULES, facts(title=""), stored) == 'Too senior: the title says "Senior".'
+    assert skip_reason(RULES, facts(company="Jobgether")) is None  # no skip list
+    assert skip_reason(RULES_WITH_SKIP_LIST, facts(company="Acme Software")) is None
 
 
 def test_parse_job_facts_and_page_state():
@@ -472,6 +500,38 @@ def test_applier_order_caps_and_pauses(client, fake_browser):
         }
         (question,) = session.exec(select(UnansweredQuestion)).all()
         assert (question.question, question.platform) == ("Are you willing to work night shifts?", Platform.linkedin)
+
+
+def test_applier_skips_jobs_that_dont_fit(client, fake_browser):
+    """Jobs stored before the job-fit rules (2026-10-15) are skipped at apply time, never opened."""
+    connect_linkedin(client.app, fake_browser)
+    engine = client.app.state.engine
+    with Session(engine) as session:
+        set_flag(session, AUTO_APPLY_LINKEDIN, True)
+        seed_profile(session)
+        make_field(session, key="search_skip_companies", label="Skip companies", section="Job search priority",
+                   value="Jobgether, Crossing Hurdles, Scoutit, Applicantz, CodeRound AI", position=50)
+        jobs = {
+            "aggregator": easy_job(session, 1, priority=0, company="Jobgether"),
+            "dotnet": easy_job(session, 2, priority=10, title="Full Stack Developer - .Net / React.js"),
+            "senior": easy_job(session, 3, priority=20, title="Senior Backend Engineer"),
+            "fits": easy_job(session, 4, priority=30, title="SDE 2"),
+        }
+        ids = {name: job.id for name, job in jobs.items()}
+    forms = {
+        name: scripted(fake_browser, url=jobs[name].url, company=jobs[name].company, title=jobs[name].title)
+        for name in jobs
+    }
+
+    outcome = LinkedInApplier(rng=lambda low, high: low).run(make_ctx(client.app))
+
+    assert outcome.message == "Applied to 1, 3 skipped by your rules."
+    assert all(not forms[name].clicks for name in ("aggregator", "dotnet", "senior")) and forms["fits"].submitted
+    with Session(engine) as session:
+        reasons = {name: session.get(Job, ids[name]).status_reason for name in ids}
+    assert reasons["aggregator"] == "Not auto-applied: Jobgether is on your skip list."
+    assert reasons["dotnet"] == 'Not auto-applied: Another stack: the title says ".Net" and names none of your skills.'
+    assert reasons["senior"] == 'Not auto-applied: Too senior: the title says "Senior".'
 
 
 def test_applier_respects_the_daily_cap(client, fake_browser):

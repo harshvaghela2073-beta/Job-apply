@@ -8,9 +8,8 @@
   "Software Engineer II") matches the leveled role (SDE2) when the list has one; otherwise roles are
   tried in priority order and the first match wins.
 - Internships never match. The minimum experience must be at most the highest level in
-  ``search_experience_order`` (3 years). When the platform gives no experience, titles with
-  Senior/Sr/Lead or level III+ are skipped; Staff/Principal/Architect/Manager/Director/Head titles
-  are always skipped.
+  ``search_experience_order`` (3 years). Senior titles, other stacks and the companies on the skip
+  list are left out by ``app.scanner.fit`` (2026-10-15), which the scanners apply after these rules.
 - "Today" is the server's local day (Asia/Kolkata on the candidate's machine).
 - ``priority = experience_bucket * 100 + role_index * 10 + location_index`` (lower is better).
 """
@@ -27,6 +26,8 @@ from app.timeutils import local_day_bounds, local_today, to_utc
 EXPERIENCE_KEY = "search_experience_order"
 ROLES_KEY = "search_roles"
 LOCATIONS_KEY = "search_locations"
+SKIP_COMPANIES_KEY = "search_skip_companies"  # optional; missing means no company is skipped
+SKILLS_KEY = "skills"
 
 
 class PrefsMissing(ValueError):
@@ -118,10 +119,6 @@ class RoleMatcher:
 
 
 _INTERN = re.compile(r"\b(?:intern|interns|internship|internships)\b")
-_STRONG_SENIORITY = re.compile(
-    r"\b(?:staff|principal|architect|director|head|vp|vice president|distinguished|fellow|manager)\b"
-)
-_WEAK_SENIORITY = re.compile(r"\b(?:senior|sr|lead|developer [3-9]|sde [3-9])\b")
 
 
 def is_internship(text: str) -> bool:
@@ -252,12 +249,19 @@ class SearchPrefs:
     experience_years: tuple[int, ...]  # (1, 2, 3)
     roles: tuple[str, ...]
     locations: tuple[str, ...]
+    skills: tuple[str, ...] = ()  # profile field ``skills``: a title naming one isn't "another stack"
+    skip_companies: tuple[str, ...] = ()  # ``search_skip_companies``
 
     @classmethod
-    def from_values(cls, experience: str, roles: str, locations: str) -> "SearchPrefs":
+    def from_values(
+        cls, experience: str, roles: str, locations: str, *, skills: str = "", skip_companies: str = ""
+    ) -> "SearchPrefs":
         labels = tuple(split_list(experience))
         years = tuple(y for y in (experience_level_years(label) for label in labels) if y is not None)
-        prefs = cls(labels, years, tuple(split_list(roles)), tuple(split_list(locations)))
+        prefs = cls(
+            labels, years, tuple(split_list(roles)), tuple(split_list(locations)),
+            tuple(split_list(skills)), tuple(split_list(skip_companies)),
+        )
         for key, value in (
             (EXPERIENCE_KEY, prefs.experience_years),
             (ROLES_KEY, prefs.roles),
@@ -288,12 +292,12 @@ class SearchPrefs:
 
 
 def load_prefs(session: Session) -> SearchPrefs:
-    rows = session.exec(
-        select(ProfileField).where(col(ProfileField.key).in_([EXPERIENCE_KEY, ROLES_KEY, LOCATIONS_KEY]))
-    ).all()
+    keys = [EXPERIENCE_KEY, ROLES_KEY, LOCATIONS_KEY, SKILLS_KEY, SKIP_COMPANIES_KEY]
+    rows = session.exec(select(ProfileField).where(col(ProfileField.key).in_(keys))).all()
     values = {row.key: row.value for row in rows}
     return SearchPrefs.from_values(
-        values.get(EXPERIENCE_KEY, ""), values.get(ROLES_KEY, ""), values.get(LOCATIONS_KEY, "")
+        values.get(EXPERIENCE_KEY, ""), values.get(ROLES_KEY, ""), values.get(LOCATIONS_KEY, ""),
+        skills=values.get(SKILLS_KEY, ""), skip_companies=values.get(SKIP_COMPANIES_KEY, ""),
     )
 
 
@@ -313,7 +317,8 @@ def match_title(
     min_experience: float | None = None,
     fallback_bucket: int | None = None,
 ) -> TitleMatch | None:
-    """Apply the role, internship and experience rules to a job title.
+    """Apply the role, internship and experience rules to a job title. Seniority is
+    ``app.scanner.fit``'s rule (the scanners count the jobs it leaves out).
 
     ``min_experience`` is the platform's own figure; without it, a figure in the title
     ("2 to 4 years") is used, and without that, ``fallback_bucket`` (e.g. from LinkedIn's
@@ -324,14 +329,9 @@ def match_title(
     role = matcher.match(title)
     if role is None:
         return None
-    norm = normalize(title)
-    if _STRONG_SENIORITY.search(norm):
-        return None
     if min_experience is None:
         min_experience = parse_min_experience(title)
     if min_experience is None:
-        if _WEAK_SENIORITY.search(norm):
-            return None
         bucket = fallback_bucket if fallback_bucket is not None else len(prefs.experience_years) - 1
     else:
         bucket = prefs.experience_bucket(min_experience)

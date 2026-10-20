@@ -515,3 +515,64 @@ def test_test_note_endpoint(client, fake_browser):
     assert (row["kind"], row["status"], row["recipient_profile_url"]) == ("connection_note", "sent", PRIYA)
     again = client.post("/api/outreach/test-note", params={"profile_url": PRIYA, "dry_run": False})
     assert again.status_code == 409 and "never sent twice" in again.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# The 2026-10-15 profile layout (saved page): no top card, no <h1>; Connect is a link to the
+# invitation page of that person; other people's Connect links sit in "More profiles for you"; the
+# search box's suggestions are a role="dialog" popover. People are made up.
+
+NEW_LAYOUT = """<html><head><title>(2) Asha Example | LinkedIn</title></head><body>
+<div role="dialog" data-testid="popover-floating"><input data-testid="typeahead-input"></div>
+<main><section><p>Asha Example</p><p>Talent Acquisition @ Acme</p>
+ <button type="button" aria-expanded="false">More</button>
+ <a href="/messaging/compose/?profileUrn=x">Message</a>
+ <a href="/preload/custom-invite/?vanityName=asha-example-12ab" aria-label="Invite Asha Example to connect">Connect</a>
+</section>
+<aside><a href="/preload/custom-invite/?vanityName=someone-else" aria-label="Invite Someone Else to connect">Connect</a>
+ <button aria-label="Follow Someone Else">Follow</button></aside></main>
+<dialog><button aria-label="Dismiss"></button>Ad Options</dialog>
+</body></html>"""
+
+
+def test_new_layout_profile_reads_its_own_connect_link():
+    from app.sources.linkedin.parse import profile_slug, read_profile
+
+    slug = profile_slug("https://www.linkedin.com/in/Asha-Example-12ab/?trk=x")
+    assert slug == "asha-example-12ab"
+    view = read_profile(NEW_LAYOUT, slug)
+    assert view.new_layout and view.name == "Asha Example"
+    assert view.connect_href == "https://www.linkedin.com/preload/custom-invite/?vanityName=asha-example-12ab"
+    assert "Invite Asha Example to connect" in view.buttons and "Invite Someone Else to connect" not in view.buttons
+    assert not view.dialog  # the search popover and a closed <dialog> aren't the invitation
+    assert not view.pending
+
+    other = read_profile(NEW_LAYOUT, "nobody-here")
+    assert other.connect_href is None  # never another person's link
+
+    pending = NEW_LAYOUT.replace(
+        '<a href="/preload/custom-invite/?vanityName=asha-example-12ab" aria-label="Invite Asha Example to connect">Connect</a>',
+        '<button aria-label="Pending, click to withdraw invitation sent to Asha Example">Pending</button>',
+    )
+    assert read_profile(pending, slug).pending
+
+
+def test_people_blocked_by_the_layout_bug_are_tried_once_more(session):
+    from datetime import datetime, timezone
+
+    from app.models import OutreachKind, OutreachMessage, OutreachStatus
+    from app.sources.linkedin.outreach import NO_CONNECT, contacted_profiles
+
+    def note(url, error, created):
+        session.add(OutreachMessage(kind=OutreachKind.connection_note, status=OutreachStatus.failed, body="Hi", recipient_name="Test Person",
+                                    recipient_profile_url=url, error=error, created_at=created))
+
+    before = datetime(2026, 10, 15, 9, 0, tzinfo=timezone.utc)
+    after = datetime(2026, 10, 15, 13, 0, tzinfo=timezone.utc)
+    note("https://www.linkedin.com/in/blocked-by-bug/", f"Not sent: {NO_CONNECT}", before)
+    note("https://www.linkedin.com/in/really-no-connect/", f"Not sent: {NO_CONNECT}", after)
+    note("https://www.linkedin.com/in/other-failure/", "Not sent: The note box didn't open.", before)
+    session.commit()
+    contacted = contacted_profiles(session)
+    assert "https://www.linkedin.com/in/blocked-by-bug/" not in contacted
+    assert {"https://www.linkedin.com/in/really-no-connect/", "https://www.linkedin.com/in/other-failure/"} <= contacted

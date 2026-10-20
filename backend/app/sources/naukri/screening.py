@@ -2,9 +2,12 @@
 
 A job is not applied to (status ``skipped``, with the reason) when any rule matches:
 
+0. Job fit (2026-10-15, ``app.scanner.fit``): the company is on the skip list
+   (``search_skip_companies``), or the title is for another stack or too senior.
 1. Salary: Naukri shows a salary whose top is below the candidate's current CTC (profile field
    ``current_ctc``). A hidden salary ("Not disclosed") is fine.
-2. Skills: the job's key skills include none of the candidate's skills (profile field ``skills``).
+2. Skills: fewer than 2 of the candidate's skills (profile field ``skills``) in the job's key skills,
+   title and description. Checked only when the key skills are known.
 3. Fresher / internship-style: experience starts at 0 years and the text mentions internships,
    trainees, training or freshers.
 4. Consultancy / individual recruiter: the company is hidden ("MNC's", "Reputed company", ...),
@@ -20,7 +23,8 @@ from dataclasses import asdict, dataclass, field
 from sqlmodel import Session, select
 
 from app.models import ProfileField
-from app.scanner.matching import parse_min_experience
+from app.scanner.fit import matching_skills, skip_list, title_reason, too_few_skills
+from app.scanner.matching import SKILLS_KEY, SKIP_COMPANIES_KEY, parse_min_experience, split_list
 from app.sources.html import first, select_any, soup, text_of, visible_text
 from app.sources.naukri import selectors as S
 
@@ -44,6 +48,7 @@ class JobFacts:
 class ApplyRules:
     min_salary_lpa: float | None  # skip when the shown salary's top is below this
     skills: tuple[str, ...]
+    skip_companies: tuple[str, ...] = ()  # ``search_skip_companies``
 
 
 def _clean(text: str) -> str:
@@ -109,34 +114,6 @@ def parse_lpa(text: str | None) -> float | None:
     return float(match.group()) if match else None
 
 
-# --- skills -----------------------------------------------------------------------------------
-
-_ALIASES = {
-    "golang": ("golang", "go"),
-    "go": ("golang", "go"),
-    "spring boot": ("spring boot", "springboot", "spring"),
-    "apache kafka": ("kafka",),
-    "kafka": ("kafka",),
-    "kubernetes": ("kubernetes", "k8s"),
-    "gke": ("gke", "google kubernetes engine"),
-    "sql": ("sql", "mysql", "postgresql", "postgres", "pl/sql", "sql server"),
-}
-
-
-def _variants(skill: str) -> tuple[str, ...]:
-    lowered = skill.strip().lower()
-    return _ALIASES.get(lowered, (lowered,))
-
-
-def _has(haystack: str, needle: str) -> bool:
-    return re.search(rf"(?<![a-z0-9+#]){re.escape(needle)}(?![a-z0-9+#])", haystack) is not None
-
-
-def matching_skills(mine: tuple[str, ...], job_skills: list[str]) -> list[str]:
-    haystack = " , ".join(job_skills).lower()
-    return [skill for skill in mine if any(_has(haystack, v) for v in _variants(skill))]
-
-
 # --- freshers / consultancies --------------------------------------------------------------------
 
 _FRESHER = re.compile(r"\b(internships?|interns?|trainees?|training|freshers?)\b", re.I)
@@ -165,17 +142,28 @@ def looks_like_person(name: str) -> bool:
 
 
 def skip_reason(rules: ApplyRules, facts: JobFacts, *, stored_company: str = "", stored_text: str = "",
-                stored_experience: str = "") -> str | None:
+                stored_experience: str = "", stored_title: str = "") -> str | None:
     """Why auto-apply should skip this job, or None to apply."""
+    # 0. Job fit: the skip list, another stack, a senior title.
+    verdict = title_reason(
+        stored_title, [facts.company, stored_company], skills=rules.skills, skip_companies=rules.skip_companies
+    )
+    if verdict:
+        return verdict[1]
+
     # 1. Salary below the current CTC.
     top = salary_top_lpa(facts.salary)
     if rules.min_salary_lpa is not None and top is not None and top < rules.min_salary_lpa:
         return f"Salary {facts.salary} is below your current {rules.min_salary_lpa:g} LPA."
 
-    # 2. None of the candidate's skills.
-    job_skills = facts.skills or [s for s in stored_text.split(" · ")[0].split(",") if s.strip()]
-    if rules.skills and job_skills and not matching_skills(rules.skills, job_skills):
-        return "None of your skills are in the job's key skills (" + ", ".join(job_skills[:6]) + ")."
+    # 2. Fewer than 2 of the candidate's skills in the key skills, title and description.
+    stored_skills, _, stored_description = stored_text.partition(" · ")
+    job_skills = facts.skills or [s.strip() for s in stored_skills.split(",") if s.strip()]
+    if rules.skills and job_skills:
+        found = matching_skills(rules.skills, job_skills, f"{stored_title}\n{facts.description or stored_description}")
+        where = "the job's key skills (" + ", ".join(job_skills[:6]) + "), title or description"
+        if reason := too_few_skills(found, where, rules.skills):
+            return reason
 
     # 3. Fresher / internship-style.
     min_exp = parse_min_experience(facts.experience or stored_experience or "")
@@ -199,5 +187,8 @@ def skip_reason(rules: ApplyRules, facts: JobFacts, *, stored_company: str = "",
 
 def load_rules(session: Session) -> ApplyRules:
     fields = {f.key: f.value for f in session.exec(select(ProfileField)).all()}
-    skills = tuple(s.strip() for s in (fields.get("skills") or "").split(",") if s.strip())
-    return ApplyRules(min_salary_lpa=parse_lpa(fields.get("current_ctc")), skills=skills)
+    return ApplyRules(
+        min_salary_lpa=parse_lpa(fields.get("current_ctc")),
+        skills=tuple(split_list(fields.get(SKILLS_KEY))),
+        skip_companies=skip_list(fields.get(SKIP_COMPANIES_KEY)),
+    )

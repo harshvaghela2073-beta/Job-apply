@@ -9,6 +9,8 @@
   then the job pages are opened logged in to read their apply button ("Apply on company site" is
   only shown to logged-in users). When Naukri isn't connected the run message says so.
 - While the ``pause_naukri`` setting is on (2026-10-14), the run is skipped without opening a browser.
+- Job fit (``app.scanner.fit``, 2026-10-15): a job that matches but whose company is on the skip list
+  or whose title is for another stack or too senior isn't stored; the run message counts them.
 """
 
 import logging
@@ -21,6 +23,7 @@ from sqlmodel import Session, col, select
 from app.browser import GUEST, BrowserSession, BrowserUnavailable
 from app.models import ApplyType, Job, Platform, ScanKind, ScanStatus
 from app.scanner.base import Candidate, Pacer, ScanBlocked, ScanContext, ScanOutcome, ScanReport, truncate
+from app.scanner.fit import LEFT_OUT, left_out_note, search_left_out
 from app.scanner.matching import (
     RoleMatcher,
     estimate_posted_at,
@@ -112,6 +115,7 @@ class NaukriJobsScanner:
         pacer = pacer or ctx.pacer()
         prefs = ctx.prefs
         matcher = RoleMatcher(prefs.roles)
+        left_out: dict[str, set[str]] = {key: set() for key in LEFT_OUT}  # job ids per job-fit rule
         cut_short = False
         try:
             for position, location in enumerate(prefs.locations):
@@ -151,7 +155,7 @@ class NaukriJobsScanner:
                             reached_older = True
                             continue
                         today += 1
-                        candidate = self.candidate(job, ctx, matcher, location, remote, posted)
+                        candidate = self.candidate(job, ctx, matcher, location, remote, posted, left_out=left_out)
                         if candidate is None:
                             continue
                         matched += 1
@@ -179,6 +183,8 @@ class NaukriJobsScanner:
         except Exception as error:  # noqa: BLE001 - keep what was found so far
             logger.exception("Naukri scan stopped")
             report.failure = f"The scan stopped: {_first_line(error)}"
+        if note := left_out_note({key: len(ids) for key, ids in left_out.items()}):
+            report.notes.append(note)
         report.page_loads = pacer.loads
         return report
 
@@ -190,13 +196,21 @@ class NaukriJobsScanner:
         searched_location: str,
         remote: bool,
         posted,
+        *,
+        left_out: dict[str, set[str]] | None = None,
     ) -> Candidate | None:
+        """The job to store, or None. ``left_out`` collects the ids of matching jobs a job-fit rule
+        leaves out, per ``LEFT_OUT`` key."""
         prefs = ctx.prefs
         match = match_title(prefs, matcher, job.title, min_experience=job.min_experience)
         if match is None:
             return None
         location_index = prefs.location_index(job.location, remote=remote)
         if location_index is None:
+            return None
+        if why := search_left_out(prefs, job.title, job.company):
+            if left_out is not None:
+                left_out[why].add(job.job_id)
             return None
         location = job.location or searched_location
         if remote and "remote" not in location.lower():

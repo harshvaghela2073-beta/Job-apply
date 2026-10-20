@@ -26,7 +26,7 @@ def make_job(session: Session, **overrides) -> Job:
     values = dict(
         platform=Platform.linkedin,
         external_id=f"ext-{n}",
-        title=f"Engineer {n}",
+        title=f"Engineer #{n}",  # "Engineer 3" would be a level-3 (senior) title
         company=f"[Sample] Company {n}",
         location="Bengaluru",
         url=f"https://example.com/jobs/{n}",

@@ -156,6 +156,7 @@ def apply_on_page(
             stored_company=stored.company if stored else "",
             stored_text=stored.text if stored else "",
             stored_experience=stored.experience if stored else "",
+            stored_title=stored.title if stored else "",
         )
         if reason:
             return ApplyAttempt(ApplyResult.skipped, reason, facts=facts.as_dict())
@@ -250,7 +251,7 @@ class NaukriApplier:
 
         profile_dir = ctx.browsers.profile_dir(self.platform)
         targets = [
-            (job.id, StoredJob(job.url, job.company, job.short_description or "", job.experience or ""), job.title)
+            (job.id, StoredJob(job.url, job.company, job.short_description or "", job.experience or "", job.title), job.title)
             for job in jobs
         ]
 

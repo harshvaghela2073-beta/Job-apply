@@ -29,6 +29,9 @@ wall from the candidate's connection, so the public pages are no longer used.
 - The usual matching rules (``app.scanner.matching``): role (with synonyms), not an internship,
   minimum experience at most 3 years, a preferred location, posted today. A job whose date the page
   doesn't give is kept: the search itself covers only the past 24 hours.
+- Job fit (``app.scanner.fit``, 2026-10-15): a job that matches but whose company is on the skip list
+  or whose title is for another stack or too senior isn't stored; the run message counts them
+  ("12 left out: 7 another stack, 5 senior.").
 """
 
 import logging
@@ -52,6 +55,7 @@ from app.scanner.base import (
     ScanReport,
     capture_failure,
 )
+from app.scanner.fit import LEFT_OUT, left_out_note, search_left_out
 from app.scanner.matching import (
     RoleMatcher,
     SearchPrefs,
@@ -330,7 +334,8 @@ class LinkedInJobsScanner:
                 f"The search stopped: {text.splitlines()[0] if text else type(error).__name__}"
                 + capture_failure(browser, self.kind.value)
             )
-        stats: dict[str, set[str]] = {"undated": set(), "unknown_type": set()}  # job ids
+        # Job ids: undated, of unknown apply type, or left out by a job-fit rule (``LEFT_OUT`` keys).
+        stats: dict[str, set[str]] = {"undated": set(), "unknown_type": set(), **{key: set() for key in LEFT_OUT}}
         for job, found_by, _ in run.jobs.values():
             # Each search that found it (Bengaluru / Remote match differently); the store keeps the
             # most important candidate.
@@ -358,6 +363,8 @@ class LinkedInJobsScanner:
                 f"{len(run.jobs) - by_api} from {run.renders} rendered page(s)); "
                 f"{len({c.external_id for c in report.candidates})} matched your roles, experience and locations."
             )
+        if note := left_out_note({key: len(stats[key]) for key in LEFT_OUT}):
+            report.notes.append(note)
         if run.listed_without_details:
             report.notes.append(
                 f"{run.listed_without_details} listed job(s) came without details (title, company) and were skipped."
@@ -503,6 +510,9 @@ class LinkedInJobsScanner:
         remote = is_remote_location(query.location)
         location_index = prefs.location_index(job.location, remote=remote)
         if location_index is None:
+            return None
+        if why := search_left_out(prefs, job.title, job.company):
+            stats[why].add(job.job_id)
             return None
         location = job.location or query.location
         if remote and "remote" not in location.lower():

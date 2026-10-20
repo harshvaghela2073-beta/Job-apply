@@ -12,7 +12,7 @@ from app.sources.naukri.parse import (
 )
 from app.sources.naukri.scanner import NaukriJobsScanner, search_url
 from tests.fakes import FakeSession, api, page
-from tests.scan_helpers import PREFS, epoch_ms, make_ctx, ten_am_today
+from tests.scan_helpers import FIT_PREFS, PREFS, epoch_ms, make_ctx, ten_am_today
 
 NOW = ten_am_today()
 
@@ -167,8 +167,8 @@ def test_search_url():
 # Scanner
 
 
-def scan(client, fake_browser, *, known=(), max_loads=20):
-    ctx = make_ctx(client.app, NOW, max_loads=max_loads)
+def scan(client, fake_browser, *, known=(), max_loads=20, prefs=PREFS):
+    ctx = make_ctx(client.app, NOW, max_loads=max_loads, prefs=prefs)
     session = FakeSession(fake_browser, None, True)
     return NaukriJobsScanner().scan(session, ctx, known=set(known))
 
@@ -208,6 +208,26 @@ def test_scan_filters_and_ranks(client, fake_browser):
     remote = by_id["9"]
     assert remote.location == "Remote" and remote.priority == 2 * 100 + 5 * 10 + 1
     assert all(c.posted_at is not None for c in report.candidates)
+
+
+def test_scan_leaves_out_other_stacks_senior_titles_and_skip_listed_companies(client, fake_browser):
+    """Job fit (2026-10-15): such jobs aren't stored, and the run message counts them (each job once)."""
+    dotnet = nk_job("11", "Dotnet Full Stack Developer", location="Bengaluru, Remote")
+    fake_browser.routes = [
+        search_page("-jobs-in-bengaluru?", nk_json(
+            dotnet,
+            nk_job("12", "Java Full Stack Developer (Spring Boot + Angular)"),
+            nk_job("13", "Senior Java Developer", exp="2-6 Yrs", min_exp="2"),
+            nk_job("14", "SDE 2"),
+            nk_job("15", "Backend Developer", company="Scoutit"),
+            nk_job("16", "Software Support Engineer"),
+            nk_job("17", "Senior Backend Developer", exp="6-10 Yrs", min_exp="6"),  # too much experience first
+        )),
+        search_page("wfhType=2", nk_json(dotnet)),
+    ]
+    report = scan(client, fake_browser, prefs=FIT_PREFS)
+    assert {c.external_id for c in report.candidates} == {"12", "14"}
+    assert report.notes == ["4 left out: 2 another stack, 1 senior, 1 on your skip list."]
 
 
 def test_scan_pages_until_known_or_older(client, fake_browser):

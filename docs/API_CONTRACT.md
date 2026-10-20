@@ -841,3 +841,37 @@ persistent disk). These additions make that safe; locally (no `APP_PASSWORD`) no
   for an invalid file. The database upload is copied into the live database in one transaction
   (SQLite backup API) instead of replacing the file; the server keeps its own `connection` rows (the
   logins it holds), closes runs the upload shows as running, and re-reads the scan intervals.
+
+## Job fit and outreach accuracy (2026-10-15)
+
+The candidate asked for fewer, better-fitting applications to get interview calls sooner.
+
+### Fit rules (both platforms)
+
+Applied when a job is found (LinkedIn and Naukri searches: the job isn't stored; the run message
+says "N left out: X another stack, Y senior, Z on your skip list.") and again before auto-apply
+(status reason "Not auto-applied: ..."):
+
+| Rule | Reason shown |
+|---|---|
+| The company contains an entry of the profile field `search_skip_companies` (comma-separated, editable in the Template Library; starts with Jobgether, Crossing Hurdles, Scoutit, Applicantz, CodeRound AI) | `<company> is on your skip list.` |
+| The title names another stack (Android, iOS, .NET/C#, PHP, Ruby, Salesforce, SAP, Oracle, Mainframe, QA/Test/SDET, Support, Embedded, Games, Data Annotation, frontend-only, Kotlin, ...) and none of the candidate's skills | `Another stack: the title says "<term>" and names none of your skills.` |
+| The title is senior (Senior, Sr., Lead, Principal, Staff, Architect, Manager, Head, Director, VP, SDE 3 / III, L3); SDE 2 / Software Engineer II are kept | `Too senior: the title says "<term>".` |
+| Fewer than 2 of the candidate's skills in the title and description (Naukri: also key skills), when those are known | `Only 1 of your skills (<skill>) is in <where>; at least 2 are needed.` |
+
+- Hiring posts: the skip list (the author's company) and the senior rule on the role line; the
+  email sender also skips stored posts of a skip-listed company ("Not emailed: <company> is on your
+  skip list.").
+
+### Connection notes on LinkedIn's 2026-10-15 profile page
+
+- The profile page has no top card or `<h1>`: the name comes from the page title, and Connect is a
+  link `<a aria-label="Invite <Name> to connect" href="/preload/custom-invite/?vanityName=<slug>">`.
+  Only the link with the profile's own vanityName is used (other people's Connect links are on the
+  page too).
+- The invitation opens inside LinkedIn's hidden preload frame, so the tool opens that invitation
+  page itself: "Add a note" -> the note -> "Send invitation".
+- The search box's suggestions popover (`role="dialog"`, `data-testid="popover-floating"`) isn't
+  the invitation dialog.
+- Notes that failed with "no Connect button" before the fix (2026-10-15 12:20 UTC) are tried once
+  more.

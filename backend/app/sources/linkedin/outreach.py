@@ -41,10 +41,11 @@ import random
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import and_, not_
 from sqlmodel import Session, col, select
 
 from app.browser import BrowserSession, BrowserUnavailable
@@ -85,6 +86,7 @@ from app.sources.linkedin.parse import (
     normalize_profile_url,
     parse_hiring_team,
     pick_contact,
+    profile_slug,
     read_profile,
 )
 from app.timeutils import local_day_bounds, local_month_bounds, to_utc, utcnow
@@ -168,9 +170,33 @@ def _dismiss(browser: BrowserSession) -> None:
         browser.wait(1.0)
 
 
-def _click_connect(browser: BrowserSession, name: str | None, seen: _Seen) -> bool:
+def _click_own_connect_link(browser: BrowserSession, slug: str | None, seen: _Seen) -> bool:
+    """The 2026-10-15 layout: click this person's Connect link (by its vanityName), first on the page,
+    else in the "More" menu. Never another person's link."""
+    if not slug:
+        return False
+    selector = f"{S.CUSTOM_INVITE_LINK}[href*='vanityName={slug}' i]"
+    view = read_profile(browser.html(), slug)
+    if not view.new_layout:
+        return False
+    if view.connect_href and browser.click(selector):
+        return True
+    if not browser.click_role("button", S.MORE_NAME):  # the first "More" is the top card's
+        return False
+    browser.wait(1.0)
+    view = read_profile(browser.html(), slug)
+    seen.add(view.buttons)
+    if view.connect_href and browser.click(selector):
+        return True
+    browser.click_role("button", S.MORE_NAME)  # close the menu
+    return False
+
+
+def _click_connect(browser: BrowserSession, name: str | None, seen: _Seen, slug: str | None = None) -> bool:
     """Click "Connect" on the top card, or "More" -> "Connect". The name-specific pattern comes
     first so another person's Connect button (e.g. "People also viewed") is never clicked."""
+    if _click_own_connect_link(browser, slug, seen):
+        return True
     patterns = ([rf"^\s*invite {re.escape(name)} to connect\s*$"] if name else []) + [S.CONNECT_NAME]
     for pattern in [*patterns, S.CONNECT_TEXT_NAME]:
         if browser.click_role("button", pattern, within=S.PROFILE_TOP_CARD_SCOPE):
@@ -189,13 +215,13 @@ def _click_connect(browser: BrowserSession, name: str | None, seen: _Seen) -> bo
     return False
 
 
-def _wait_for(browser: BrowserSession, done: Callable, seconds: float, seen: _Seen):
-    view = read_profile(browser.html())
+def _wait_for(browser: BrowserSession, done: Callable, seconds: float, seen: _Seen, slug: str | None = None):
+    view = read_profile(browser.html(), slug)
     waited = 0.0
     while not done(view) and waited < seconds:
         browser.wait(1.0)
         waited += 1.0
-        view = read_profile(browser.html())
+        view = read_profile(browser.html(), slug)
     seen.add(view.dialog_buttons)
     return view
 
@@ -213,10 +239,11 @@ def send_connection_note(
     name the profile shows. Raises ``LoginWall`` / ``ScanBlocked``."""
     result = browser.goto(profile_url, wait_for=S.PROFILE_READY, timeout=40)
     check_profile_page(result)
-    view = read_profile(browser.html())
+    slug = profile_slug(profile_url)
+    view = read_profile(browser.html(), slug)
     if not view.buttons and not view.unavailable:
         browser.wait(2.0)  # the top card's buttons render late on slow loads
-        view = read_profile(browser.html())
+        view = read_profile(browser.html(), slug)
     seen = _Seen()
     seen.add(view.buttons)
     name = view.name
@@ -234,12 +261,22 @@ def send_connection_note(
     sent_before = view.sent
     if view.weekly_limit:
         return attempt(NoteResult.weekly_limit, WEEKLY_LIMIT_STOP + ".")
-    if not _click_connect(browser, name, seen):
-        return attempt(NoteResult.no_connect, NO_CONNECT)
+    if not _click_connect(browser, name, seen, slug):
+        # Nothing readable on the top card usually means a changed page layout: keep the page.
+        saved = "" if view.buttons else capture_failure(browser, kind)
+        return attempt(NoteResult.no_connect, NO_CONNECT + saved)
 
     view = _wait_for(
-        browser, lambda v: v.dialog or v.weekly_limit or (v.sent and not sent_before) or v.pending, DIALOG_WAIT_SECONDS, seen
+        browser, lambda v: v.dialog or v.weekly_limit or (v.sent and not sent_before) or v.pending, DIALOG_WAIT_SECONDS, seen, slug
     )
+    invite_href = read_profile(browser.html(), slug).connect_href
+    if not (view.dialog or view.weekly_limit or view.sent or view.pending) and invite_href:
+        # The 2026-10-15 layout opens the invitation inside LinkedIn's hidden "preload" frame, which the
+        # page's HTML doesn't show: open the invitation page itself instead.
+        browser.goto(invite_href, timeout=40)
+        view = _wait_for(
+            browser, lambda v: v.dialog or v.note_box or v.weekly_limit or v.pending, DIALOG_WAIT_SECONDS, seen, slug
+        )
     if view.weekly_limit:
         _dismiss(browser)
         return attempt(NoteResult.weekly_limit, WEEKLY_LIMIT_STOP + "; nothing was sent.")
@@ -261,7 +298,7 @@ def send_connection_note(
             note_text = capture_failure(browser, kind)
             _dismiss(browser)
             return attempt(NoteResult.failed, 'The invitation dialog has no "Add a note" button; nothing was sent.' + note_text)
-        view = _wait_for(browser, lambda v: v.note_box or v.note_limit or v.weekly_limit, DIALOG_WAIT_SECONDS, seen)
+        view = _wait_for(browser, lambda v: v.note_box or v.note_limit or v.weekly_limit, DIALOG_WAIT_SECONDS, seen, slug)
     if view.note_limit:
         _dismiss(browser)
         return attempt(NoteResult.note_limit, NOTE_LIMIT_STOP + "; nothing was sent.")
@@ -284,7 +321,7 @@ def send_connection_note(
             NoteResult.failed,
             "The note couldn't be filled in (LinkedIn may allow fewer characters); nothing was sent." + note_text,
         )
-    view = read_profile(browser.html())
+    view = read_profile(browser.html(), slug)
     seen.add(view.dialog_buttons)
     has_send = any(re.search(S.SEND_NAME, label, re.I) for label in view.dialog_buttons)
     if dry_run:
@@ -301,7 +338,7 @@ def send_connection_note(
     while waited < CONFIRM_TIMEOUT_SECONDS:
         browser.wait(1.0)
         waited += 1.0
-        view = read_profile(browser.html())
+        view = read_profile(browser.html(), slug)
         seen.add(view.buttons)
         if view.weekly_limit:
             _dismiss(browser)
@@ -362,12 +399,24 @@ def build_note(templates: list[Template], job: JobInfo | Job | None, name: str |
     return ready_text(" ".join(text.split()), f'template "{template.question}"')
 
 
+# Until this moment every "no Connect button" came from LinkedIn's new profile layout, which the tool
+# couldn't read (fixed on 2026-10-15): those people are tried once more.
+NO_CONNECT_FIXED_AT = datetime(2026, 10, 15, 12, 20, tzinfo=UTC)
+
+
 def contacted_profiles(session: Session) -> set[str]:
-    """Profiles that already have a connection note or InMail (any status): never written to again."""
+    """Profiles that already have a connection note or InMail (any status): never written to again,
+    except a "no Connect button" failure from before ``NO_CONNECT_FIXED_AT`` (tried once more)."""
+    layout_bug = and_(
+        OutreachMessage.status == OutreachStatus.failed,
+        col(OutreachMessage.error).contains(NO_CONNECT),
+        col(OutreachMessage.created_at) < NO_CONNECT_FIXED_AT,
+    )
     urls = session.exec(
         select(OutreachMessage.recipient_profile_url).where(
             col(OutreachMessage.kind).in_([OutreachKind.connection_note, OutreachKind.inmail]),
             col(OutreachMessage.recipient_profile_url).is_not(None),
+            not_(layout_bug),
         )
     ).all()
     return {normalized for url in urls if (normalized := normalize_profile_url(url))}

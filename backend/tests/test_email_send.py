@@ -1,6 +1,7 @@
 """Automatic emails to hiring posts: message building, the SMTP mailer (with a fake server), the
 ``email_send`` scanner and the test-email endpoint. No network: every SMTP call goes to FakeSMTP."""
 
+import dataclasses
 import smtplib
 from datetime import timedelta
 
@@ -413,3 +414,22 @@ def test_yesterdays_posts_are_still_emailed(client):
     outcome = sender(server).run(ctx_with_smtp(client))
     assert [str(m["To"]) for m in server.sent] == ["hr1@acme.com"]
     assert (outcome.found, outcome.new) == (1, 1)
+
+
+def test_skip_listed_companies_are_not_emailed(client):
+    """Posts saved before the skip list existed (2026-10-15) are never emailed."""
+    engine = client.app.state.engine
+    with Session(engine) as session:
+        set_flag(session, AUTO_SEND_EMAIL, True)
+        template(session)
+        email_job(session, 1, priority=10, company="Jobgether")
+        email_job(session, 2, priority=20, company="Acme")
+    server = FakeSMTP()
+    ctx = ctx_with_smtp(client)
+    ctx.prefs = dataclasses.replace(ctx.prefs, skip_companies=("jobgether",))
+    outcome = sender(server).run(ctx)
+    assert [str(m["To"]) for m in server.sent] == ["hr2@acme.com"]
+    assert "1 skipped (on your skip list)" in outcome.message
+    with Session(engine) as session:
+        skipped = session.exec(select(Job).where(Job.company == "Jobgether")).one()
+        assert skipped.status == JobStatus.skipped and skipped.status_reason == "Not emailed: Jobgether is on your skip list."

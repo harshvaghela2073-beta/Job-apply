@@ -4,6 +4,7 @@ import pytest
 
 from app.models import ApplyType
 from app.sources.linkedin.parse import (
+    Post,
     account_name,
     company_from_headline,
     find_emails,
@@ -17,7 +18,7 @@ from app.sources.linkedin.selectors import POST_FORM_SCROLLS, POST_SCROLLS
 from app.sources.linkedin.posts import FORM_QUERIES, LinkedInPostsScanner, best_role, post_queries, search_url
 from app.scanner.matching import RoleMatcher
 from tests.fakes import FakeSession, page
-from tests.scan_helpers import PREFS, make_ctx, ten_am_today
+from tests.scan_helpers import FIT_PREFS, PREFS, make_ctx, ten_am_today
 
 NOW = ten_am_today()
 
@@ -200,6 +201,53 @@ def test_best_role_skips_intern_lines():
     matcher = RoleMatcher(PREFS.roles)
     assert best_role(matcher, "Hiring Backend Developer interns.\nAlso hiring Java Developers!") == ("Java Developer", 3)
     assert best_role(matcher, "Backend Developer internship") is None
+
+
+def test_best_role_skips_senior_lines():
+    """Job fit (2026-10-15): the senior rule applies to the line that names the role."""
+    matcher = RoleMatcher(PREFS.roles)
+    assert best_role(matcher, "Hiring Senior Backend Developer.\nAlso hiring SDE1 for payments!") == ("SDE1", 1)
+    assert best_role(matcher, "Hiring Sr. Java Developer") is None  # "Sr." doesn't end the line
+    assert best_role(matcher, "Hiring Tech Lead | Java Developer") == ("Java Developer", 3)  # its own line
+    assert best_role(matcher, "I'm the hiring manager: hiring Java Developers") == ("Java Developer", 3)
+
+
+def test_posts_skip_list_and_senior_roles(client):
+    matcher = RoleMatcher(FIT_PREFS.roles)
+    fit_ctx = make_ctx(client.app, NOW, prefs=FIT_PREFS)
+
+    def judge(text, *, headline="Engineering Manager at Acme Corp | Hiring", author="Priya Sharma", ctx=fit_ctx):
+        post = Post(urn="urn:li:activity:7381000000000000099", text=text, author=author, headline=headline, time_label="2h")
+        return LinkedInPostsScanner().judge(post, ctx, matcher)
+
+    text = "Hiring Backend Developers (1-3 years) in Bangalore. jobs@acme.com"
+    assert judge(text)[0] is not None
+    assert judge(text, headline="Talent Partner at Scoutit | Hiring") == (None, "company")
+    assert judge(text, headline="Hiring for our clients", author="Crossing Hurdles") == (None, "company")
+    assert judge(text, headline="Talent Partner at Scoutit", ctx=make_ctx(client.app, NOW))[0] is not None  # no skip list
+    assert judge("Hiring Senior Backend Developer in Bangalore. jobs@acme.com") == (None, "senior")
+    assert judge("We're hiring a Team Lead (Java Developer). jobs@acme.com") == (None, "senior")
+    assert judge("Hiring Sr. Java Developer! jobs@acme.com") == (None, "senior")
+    assert judge("Hiring SDE-3 (Backend Developer). jobs@acme.com") == (None, "senior")
+    junior, _ = judge("Hiring Senior Backend Developer.\nAlso hiring SDE1 for payments (1-3 years). jobs@acme.com")
+    assert junior is not None and junior.matched_role == "SDE1"
+    assert judge("Hiring manager here, we're hiring Java Developers in Bangalore, jobs@acme.com")[0] is not None
+    assert judge("Hiring SDE2 (Backend Developer), 2+ years. jobs@acme.com")[0] is not None
+
+
+def test_posts_scan_counts_senior_and_skip_listed_posts(client, fake_browser):
+    posts = [
+        post_html("urn:li:activity:7381000000000000031", "Hiring Senior Backend Developer in Bangalore. jobs@acme.com"),
+        post_html("urn:li:activity:7381000000000000032", "Hiring Backend Developers (1-3 years). jobs@scoutit.com",
+                  headline="Recruiter at Scoutit | Hiring"),
+        post_html("urn:li:activity:7381000000000000033", "Hiring Java Developers (1-3 years). jobs@acme.com"),
+    ]
+    html = "<html><body><ul>" + "".join(f"<li>{p}</li>" for p in posts) + "</ul></body></html>"
+    fake_browser.routes = [("search/results/content", page("https://www.linkedin.com/search/results/content/?keywords=x", html))]
+    report = LinkedInPostsScanner().scan(FakeSession(fake_browser, None, True), make_ctx(client.app, NOW, prefs=FIT_PREFS))
+    assert [c.external_id for c in report.candidates] == ["urn:li:activity:7381000000000000033"]
+    (note,) = report.notes
+    assert "1 a senior role" in note and "1 on your skip list" in note
 
 
 def test_posts_scan(client, fake_browser):

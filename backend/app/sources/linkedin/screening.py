@@ -1,10 +1,13 @@
 """Skip rules for LinkedIn Easy Apply: the candidate's four Naukri rules (2026-10-13), adapted to
 LinkedIn's job page. A job is not applied to (status ``skipped``, with the reason) when:
 
+0. Job fit (2026-10-15, ``app.scanner.fit``): the company is on the skip list
+   (``search_skip_companies``), or the title is for another stack or too senior.
 1. Salary: the page shows a salary ("₹12,00,000/yr - ₹18,00,000/yr", "₹15L/yr") whose top is below
    the candidate's current CTC (profile field ``current_ctc``). No salary shown is fine.
-2. Skills: none of the candidate's skills (profile field ``skills``) appears in the job's title or
-   description (whole words; aliases such as Go/Golang count).
+2. Skills: fewer than 2 of the candidate's skills (profile field ``skills``) appear in the job's
+   title and description (whole words; aliases such as Go/Golang count). Checked only when the
+   description was read.
 3. Fresher / internship: LinkedIn's level says "Internship", or the minimum experience is 0 years
    and the text mentions internships, trainees, training or freshers.
 4. Consultancy: the company name says recruitment / placement / staffing / consultancy, the company
@@ -18,6 +21,7 @@ import re
 from dataclasses import asdict, dataclass
 
 from app.scanner.applying import StoredJob
+from app.scanner.fit import matching_skills, title_reason, too_few_skills
 from app.scanner.matching import is_internship, parse_min_experience
 from app.sources.html import first, select_any, soup, text_of
 from app.sources.linkedin import selectors as S
@@ -27,7 +31,6 @@ from app.sources.naukri.screening import (  # pure text rules, shared with Naukr
     _PLACEHOLDER_COMPANY,
     ApplyRules,
     load_rules,  # noqa: F401 - re-exported for the applier
-    matching_skills,
     salary_top_lpa,
 )
 
@@ -156,15 +159,24 @@ def parse_job_facts(html: str) -> LinkedInJobFacts:
 def skip_reason(rules: ApplyRules, facts: LinkedInJobFacts, stored: StoredJob | None = None) -> str | None:
     """Why auto-apply should skip this job, or None to apply."""
     stored = stored or StoredJob(url="")
+    title = facts.title or stored.title
+    # 0. Job fit: the skip list, another stack, a senior title.
+    verdict = title_reason(
+        title, [facts.company, stored.company], skills=rules.skills, skip_companies=rules.skip_companies
+    )
+    if verdict:
+        return verdict[1]
+
     # 1. Salary below the current CTC.
     top = linkedin_salary_top_lpa(facts.salary)
     if rules.min_salary_lpa is not None and top is not None and top < rules.min_salary_lpa:
         return f"Salary {facts.salary} is below your current {rules.min_salary_lpa:g} LPA."
 
-    # 2. None of the candidate's skills in the title and description.
-    title = facts.title or stored.title
-    if rules.skills and facts.description and not matching_skills(rules.skills, [title, facts.description]):
-        return "None of your skills are in the job's title or description."
+    # 2. Fewer than 2 of the candidate's skills in the title and description.
+    if rules.skills and facts.description:
+        found = matching_skills(rules.skills, [], f"{title}\n{facts.description}")
+        if reason := too_few_skills(found, "the job's title or description", rules.skills):
+            return reason
 
     # 3. Fresher / internship.
     if facts.level.lower() == "internship" or is_internship(title):

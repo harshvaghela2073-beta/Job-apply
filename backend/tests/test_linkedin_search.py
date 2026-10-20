@@ -21,7 +21,7 @@ from app.sources.linkedin.jobs import (
 )
 from app.sources.linkedin.parse import parse_search_page, search_block_reason
 from tests.fakes import FakeSession, api, page
-from tests.scan_helpers import PREFS, connect_linkedin, epoch_ms, make_ctx, ten_am_today
+from tests.scan_helpers import FIT_PREFS, PREFS, connect_linkedin, epoch_ms, make_ctx, ten_am_today
 
 NOW = ten_am_today()
 SEARCH = "https://www.linkedin.com/jobs/search/"
@@ -272,7 +272,41 @@ def test_search_scan_rendering_only(client, fake_browser):
         "Bengaluru and Remote results pages; their pages are rendered instead."
     )
     assert "Read 10 jobs (0 through LinkedIn's job-data request in 0 call(s), 10 from 10 rendered page(s)); 5 matched your roles, experience and locations." in report.notes
+    assert "1 left out: 1 senior." in report.notes  # "Senior Software Engineer"
     assert not any(note.startswith("Stopped at this run's limit") for note in report.notes)
+
+
+def test_search_leaves_out_other_stacks_senior_titles_and_skip_listed_companies(client, fake_browser):
+    """Job fit (2026-10-15): such jobs aren't stored, and the run message counts them (each job once,
+    whichever searches found it)."""
+    def routes(url):
+        query = parse_qs(urlparse(url).query)
+        if not query["keywords"][0].startswith('"Software Development Engineer"'):
+            return page(url, results_html(no_results=True))
+        return page(url, results_html(
+            dom_card("200", "Full Stack Developer - .Net / React.js", location="India (Remote)"),
+            dom_card("201", "Java Full Stack Developer (Spring Boot + Angular)"),
+            dom_card("202", "Senior Backend Engineer"),
+            dom_card("203", "Tech Lead - Backend Engineer"),
+            dom_card("204", "SDE 2"),
+            dom_card("205", "Backend Developer", company="Jobgether"),
+            dom_card("206", "Android SDE 2"),
+            dom_card("207", "Software Engineer II"),
+            dom_card("208", "Oracle Software Developer", ago="2 days ago", date="2026-10-10"),  # not today: not counted
+        ))
+
+    fake_browser.routes = [("linkedin.com/jobs/search", routes)]
+    ctx = make_ctx(client.app, NOW, prefs=FIT_PREFS)
+    report = LinkedInJobsScanner().scan(FakeSession(fake_browser, None, True), ctx)
+    assert report.failure is None
+    assert {c.external_id for c in report.candidates} == {"201", "204", "207"}
+    assert "5 left out: 2 another stack, 2 senior, 1 on your skip list." in report.notes
+
+    # Without the skills and the skip list: the title rules still apply, nothing is skip-listed.
+    fake_browser.visited.clear()
+    report = LinkedInJobsScanner().scan(FakeSession(fake_browser, None, True), make_ctx(client.app, NOW))
+    assert {c.external_id for c in report.candidates} == {"201", "204", "205", "207"}
+    assert "4 left out: 2 another stack, 2 senior." in report.notes
 
 
 def test_scan_page_budget(client, fake_browser):

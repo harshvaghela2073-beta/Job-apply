@@ -28,6 +28,7 @@ from sqlmodel import Session, col, select
 
 from app.models import ApplyType, Job, JobStatus, OutreachKind, OutreachMessage, OutreachStatus, ScanKind, ScanStatus
 from app.scanner.base import ScanContext, ScanOutcome
+from app.scanner.fit import company_reason, skip_listed
 from app.services.app_settings import AUTO_SEND_EMAIL, get_flag
 from app.services.mailer import Mailer, MailError, SmtpConfig, build_email
 from app.services.outreach import (
@@ -117,7 +118,7 @@ class EmailSender:
 
         mailer = Mailer(config, self.transport_factory)
         since = to_utc(ctx.now) - timedelta(days=DEDUPE_DAYS)
-        counts = {"sent": 0, "failed": 0, "duplicate": 0}
+        counts = {"sent": 0, "failed": 0, "duplicate": 0, "skip_list": 0}
         attempts = 0
         failure = None
         for job_id in job_ids:
@@ -126,6 +127,15 @@ class EmailSender:
             with Session(ctx.engine) as session:
                 job = session.get(Job, job_id)
                 if job is None or job.status != JobStatus.found or not job.contact_email:
+                    continue
+                # Saved before the skip list existed (2026-10-15): never email a skip-listed company.
+                listed = skip_listed([job.company], ctx.prefs.skip_companies)
+                if listed:
+                    job.status = JobStatus.skipped
+                    job.status_reason = f"Not emailed: {company_reason(listed)}"
+                    session.add(job)
+                    session.commit()
+                    counts["skip_list"] += 1
                     continue
                 address = job.contact_email.strip().lower()
                 previous = last_emailed(session, address, since)
@@ -174,6 +184,8 @@ class EmailSender:
         parts = [f"Emailed {counts['sent']}"]
         if counts["duplicate"]:
             parts.append(f"{counts['duplicate']} skipped (address already emailed in the last {DEDUPE_DAYS} days)")
+        if counts["skip_list"]:
+            parts.append(f"{counts['skip_list']} skipped (on your skip list)")
         if counts["failed"]:
             parts.append(f"{counts['failed']} refused by the mail server")
         message_text = ", ".join(parts) + "."

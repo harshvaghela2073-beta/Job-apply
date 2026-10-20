@@ -12,6 +12,12 @@ ROLES = (
     "Full Stack Developer, Forward Deployed Engineer"
 )
 PREFS = SearchPrefs.from_values("1+ years, 2+ years, 3+ years", ROLES, "Bengaluru, Remote")
+# The candidate's skills and the skip list approved on 2026-10-15, for the job-fit rules.
+SKILLS = "Java, Spring Boot, Golang, Python, SQL, Redis, Apache Kafka, Cassandra, Jenkins, Docker, Grafana, GKE, Kubernetes"
+SKIP_COMPANIES = "Jobgether, Crossing Hurdles, Scoutit, Applicantz, CodeRound AI"
+FIT_PREFS = SearchPrefs.from_values(
+    "1+ years, 2+ years, 3+ years", ROLES, "Bengaluru, Remote", skills=SKILLS, skip_companies=SKIP_COMPANIES
+)
 SEARCH_FIELDS = [
     {"key": "search_experience_order", "label": "Experience", "section": "Job search",
      "value": "1+ years, 2+ years, 3+ years"},
@@ -25,12 +31,14 @@ def ten_am_today() -> datetime:
     return midnight + timedelta(hours=10)
 
 
-def make_ctx(app, now: datetime | None = None, *, max_loads: int = 20, last_ok=None) -> ScanContext:
+def make_ctx(
+    app, now: datetime | None = None, *, max_loads: int = 20, last_ok=None, prefs: SearchPrefs = PREFS
+) -> ScanContext:
     settings = app.state.settings.model_copy(update={"scan_max_page_loads": max_loads})
     return ScanContext(
         engine=app.state.engine,
         settings=settings,
-        prefs=PREFS,
+        prefs=prefs,
         now=now or ten_am_today(),
         browsers=app.state.browsers,
         connections=app.state.connections,

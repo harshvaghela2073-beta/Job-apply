@@ -6,7 +6,7 @@ import re
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from app.browser.driver import PageResult
 from app.sources.html import first, select_any, soup, text_of, visible_text
@@ -806,21 +806,75 @@ class ProfileView:
     note_limit: bool = False
     email_required: bool = False
     error: str = ""
+    # The 2026-10-15 layout: the person's own Connect link ("/preload/custom-invite/?vanityName=<slug>").
+    connect_href: str | None = None
+    new_layout: bool = False  # no top card: the 2026-10-15 profile page
 
 
-def read_profile(html: str) -> ProfileView:
+def profile_slug(url: str | None) -> str | None:
+    """"https://www.linkedin.com/in/priya-ta-12ab/" -> "priya-ta-12ab"."""
+    normalized = normalize_profile_url(url)
+    match = _PROFILE_SLUG.match(urlparse(normalized).path) if normalized else None
+    return unquote(match.group(1)).lower() if match else None
+
+
+def _title_name(doc) -> str | None:
+    """The person's name from the page title: "(2) Divya K G | LinkedIn" -> "Divya K G"."""
+    title = doc.title.get_text(" ", strip=True) if doc.title is not None else ""
+    title = re.sub(r"^\(\d+\+?\)\s*", "", title)
+    title = re.sub(r"\s*\|\s*linkedin\s*$", "", title, flags=re.I)
+    return clean_person_name(title) or None if title and title.lower() != "linkedin" else None
+
+
+def _own_actions(doc, view: ProfileView, slug: str) -> None:
+    """The 2026-10-15 layout (saved page): no top-card classes and no <h1>; Connect is a link
+    ``<a aria-label="Invite <Name> to connect" href="/preload/custom-invite/?vanityName=<slug>">``. Other
+    people's Connect links (e.g. "More profiles for you") carry their own vanityName, so only the
+    link with this profile's slug counts; Pending / Follow are recognised by the person's name."""
+    for link in doc.select(S.CUSTOM_INVITE_LINK):
+        href = link.get("href") or ""
+        vanity = unquote(parse_qs(urlparse(href).query).get("vanityName", [""])[0]).lower()
+        if vanity == slug:
+            view.connect_href = href if href.startswith("http") else S.BASE_URL + href
+            label = _button_label(link)
+            if label and label not in view.buttons:
+                view.buttons.append(label)
+            break
+    name = (view.name or "").lower()
+    for node in doc.select("[aria-label]"):
+        label = _button_label(node)
+        lowered = label.lower()
+        if name and name in lowered and (re.search(S.PENDING_NAME, label, re.I) or lowered.startswith("follow ")):
+            if label not in view.buttons:
+                view.buttons.append(label)
+    for button in doc.select("button"):  # the first "More" is the top card's
+        if _button_label(button).lower() in ("more", "more actions"):
+            view.buttons.append("More")
+            break
+
+
+def read_profile(html: str, slug: str | None = None) -> ProfileView:
+    """``slug``: the profile's vanity name, to find its own actions on the 2026-10-15 layout."""
     doc = soup(html)
     view = ProfileView()
     top = first(doc, S.PROFILE_TOP_CARD)
     name = text_of(first(top if top is not None else doc, S.PROFILE_NAME))
-    view.name = clean_person_name(name) or None
+    view.name = clean_person_name(name) or _title_name(doc)
     if top is not None:
         for button in top.select("button, [role='button'], a[role='button']"):
             label = _button_label(button)
             if label and label not in view.buttons:
                 view.buttons.append(label)
+    else:
+        view.new_layout = True
+        if slug:
+            _own_actions(doc, view, slug)
     view.pending = any(re.search(S.PENDING_NAME, label, re.I) for label in view.buttons)
-    dialogs = [node for selector in S.INVITE_DIALOG for node in doc.select(selector)]
+    dialogs = [
+        node for selector in S.INVITE_DIALOG for node in doc.select(selector)
+        # The search box's suggestions are a role="dialog" popover too (seen on 2026-10-15).
+        if node.get("data-testid") not in S.NOT_INVITE_DIALOG_TESTIDS
+    ]
     for dialog in dialogs:
         view.dialog = True
         for button in dialog.select("button"):

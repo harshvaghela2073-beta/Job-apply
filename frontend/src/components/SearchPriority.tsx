@@ -12,10 +12,26 @@ import '../templates-profile.css'
 /** Section and labels for a list field that doesn't exist yet (existing fields keep theirs). */
 const SECTION = 'Job search priority'
 
+/** `ordered`: the order is the priority (reorder arrows). `required`: a saved list can't be emptied. */
 const GROUPS = [
-  { key: 'search_experience_order', title: 'Experience', item: 'experience level', label: 'Experience (in order)' },
-  { key: 'search_roles', title: 'Roles', item: 'role', label: 'Roles (in order)' },
-  { key: 'search_locations', title: 'Locations', item: 'location', label: 'Locations' },
+  {
+    key: 'search_experience_order',
+    title: 'Experience',
+    item: 'experience level',
+    label: 'Experience (in order)',
+    ordered: true,
+    required: true,
+  },
+  { key: 'search_roles', title: 'Roles', item: 'role', label: 'Roles (in order)', ordered: true, required: true },
+  { key: 'search_locations', title: 'Locations', item: 'location', label: 'Locations', ordered: true, required: true },
+  {
+    key: 'search_skip_companies',
+    title: 'Skip companies',
+    item: 'company',
+    label: 'Skip companies',
+    ordered: false,
+    required: false,
+  },
 ] as const
 
 type Group = (typeof GROUPS)[number]
@@ -27,15 +43,15 @@ interface Item {
   text: string
 }
 
-const NO_TEXT: Lists<string> = { search_experience_order: '', search_roles: '', search_locations: '' }
+/** One value per group, made by `make`. */
+function byGroup<T>(make: (key: GroupKey) => T): Lists<T> {
+  return Object.fromEntries(GROUPS.map((g) => [g.key, make(g.key)])) as Lists<T>
+}
+
+const NO_TEXT: Lists<string> = byGroup(() => '')
 
 function savedLists(profile: Profile): Lists<string[]> {
-  const list = (key: GroupKey) => splitList(fieldValue(profile, key))
-  return {
-    search_experience_order: list('search_experience_order'),
-    search_roles: list('search_roles'),
-    search_locations: list('search_locations'),
-  }
+  return byGroup((key) => splitList(fieldValue(profile, key)))
 }
 
 /** The list as it would be saved: items trimmed and split on commas, plus what's typed in the Add box. */
@@ -50,7 +66,7 @@ function finalList(items: Item[], pending: string): string[] {
 }
 
 function problemWith(group: Group, list: string[], before: string[]): string | null {
-  if (list.length === 0 && before.length > 0) return `${group.title}: add at least one ${group.item}.`
+  if (group.required && list.length === 0 && before.length > 0) return `${group.title}: add at least one ${group.item}.`
   const seen = new Set<string>()
   for (const text of list) {
     if (seen.has(text.toLowerCase())) return `${group.title}: "${text}" is listed twice.`
@@ -99,11 +115,7 @@ function PriorityLists({ profile }: { profile: Profile }) {
     setAddError(null)
     setSavedNote(false)
     setNewText(NO_TEXT)
-    setDraft({
-      search_experience_order: toItems(saved.search_experience_order),
-      search_roles: toItems(saved.search_roles),
-      search_locations: toItems(saved.search_locations),
-    })
+    setDraft(byGroup((key) => toItems(saved[key])))
     pendingFocus.current = '.sp-edit input'
   }
 
@@ -174,18 +186,14 @@ function PriorityLists({ profile }: { profile: Profile }) {
     setAnnouncement(`${fresh.join(', ')} added.`)
   }
 
-  const onItemKeyDown = (key: GroupKey, index: number) => (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+  const onItemKeyDown = (group: Group, index: number) => (e: KeyboardEvent<HTMLInputElement>) => {
+    if (group.ordered && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
       e.preventDefault()
-      move(key, index, e.key === 'ArrowUp' ? -1 : 1, true)
+      move(group.key, index, e.key === 'ArrowUp' ? -1 : 1, true)
     }
   }
 
-  const lists: Lists<string[]> | null = draft && {
-    search_experience_order: finalList(draft.search_experience_order, newText.search_experience_order),
-    search_roles: finalList(draft.search_roles, newText.search_roles),
-    search_locations: finalList(draft.search_locations, newText.search_locations),
-  }
+  const lists: Lists<string[]> | null = draft && byGroup((key) => finalList(draft[key], newText[key]))
   const changed = lists ? GROUPS.filter((g) => joinList(lists[g.key]) !== joinList(saved[g.key])) : []
   const problem = lists
     ? (GROUPS.map((g) => problemWith(g, lists[g.key], saved[g.key])).find((p) => p !== null) ?? null)
@@ -216,11 +224,12 @@ function PriorityLists({ profile }: { profile: Profile }) {
         <div className="sp-groups sp-edit">
           {GROUPS.map((g) => {
             const items = draft[g.key]
+            const ListTag = g.ordered ? 'ol' : 'ul'
             return (
               <fieldset key={g.key} className="sp-group sp-fieldset" disabled={busy}>
                 <legend className="sp-group-title">{g.title}</legend>
                 {items.length > 0 && (
-                  <ol className="sp-edit-list">
+                  <ListTag className="sp-edit-list">
                     {items.map((item, i) => {
                       const name = item.text.trim() || g.item
                       return (
@@ -231,30 +240,34 @@ function PriorityLists({ profile }: { profile: Profile }) {
                             data-focus={`${item.id}:text`}
                             aria-label={`${capitalize(g.item)} ${i + 1} of ${items.length}`}
                             onChange={(e) => editItem(g.key, i, e.target.value)}
-                            onKeyDown={onItemKeyDown(g.key, i)}
+                            onKeyDown={onItemKeyDown(g, i)}
                           />
-                          <button
-                            type="button"
-                            className="tp-icon-btn"
-                            data-focus={`${item.id}:up`}
-                            aria-label={`Move ${name} up`}
-                            title="Move up"
-                            disabled={i === 0}
-                            onClick={() => move(g.key, i, -1)}
-                          >
-                            <ArrowUpIcon />
-                          </button>
-                          <button
-                            type="button"
-                            className="tp-icon-btn"
-                            data-focus={`${item.id}:down`}
-                            aria-label={`Move ${name} down`}
-                            title="Move down"
-                            disabled={i === items.length - 1}
-                            onClick={() => move(g.key, i, 1)}
-                          >
-                            <ArrowDownIcon />
-                          </button>
+                          {g.ordered && (
+                            <>
+                              <button
+                                type="button"
+                                className="tp-icon-btn"
+                                data-focus={`${item.id}:up`}
+                                aria-label={`Move ${name} up`}
+                                title="Move up"
+                                disabled={i === 0}
+                                onClick={() => move(g.key, i, -1)}
+                              >
+                                <ArrowUpIcon />
+                              </button>
+                              <button
+                                type="button"
+                                className="tp-icon-btn"
+                                data-focus={`${item.id}:down`}
+                                aria-label={`Move ${name} down`}
+                                title="Move down"
+                                disabled={i === items.length - 1}
+                                onClick={() => move(g.key, i, 1)}
+                              >
+                                <ArrowDownIcon />
+                              </button>
+                            </>
+                          )}
                           <button
                             type="button"
                             className="tp-icon-btn tp-icon-btn-danger"
@@ -268,7 +281,7 @@ function PriorityLists({ profile }: { profile: Profile }) {
                         </li>
                       )
                     })}
-                  </ol>
+                  </ListTag>
                 )}
                 <div className="sp-add">
                   <input
@@ -305,22 +318,25 @@ function PriorityLists({ profile }: { profile: Profile }) {
         </div>
       ) : (
         <div className="sp-groups">
-          {GROUPS.map((g) => (
-            <div key={g.key} className="sp-group">
-              <h3 className="sp-group-title">{g.title}</h3>
-              {saved[g.key].length > 0 ? (
-                <ol className="sp-chips">
-                  {saved[g.key].map((text, i) => (
-                    <li key={`${i}:${text}`}>
-                      <span className="chip">{text}</span>
-                    </li>
-                  ))}
-                </ol>
-              ) : (
-                <p className="muted small">Not set</p>
-              )}
-            </div>
-          ))}
+          {GROUPS.map((g) => {
+            const ListTag = g.ordered ? 'ol' : 'ul'
+            return (
+              <div key={g.key} className="sp-group">
+                <h3 className="sp-group-title">{g.title}</h3>
+                {saved[g.key].length > 0 ? (
+                  <ListTag className={g.ordered ? 'sp-chips' : 'sp-chips sp-chips-unordered'}>
+                    {saved[g.key].map((text, i) => (
+                      <li key={`${i}:${text}`}>
+                        <span className="chip">{text}</span>
+                      </li>
+                    ))}
+                  </ListTag>
+                ) : (
+                  <p className="muted small">Not set</p>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
 
@@ -362,7 +378,8 @@ function PriorityLists({ profile }: { profile: Profile }) {
   )
 }
 
-/** The job-search priority (`search_*` profile fields): three ordered lists, editable in place. */
+/** The job-search priority (`search_*` profile fields): three ordered lists and the companies to skip,
+ * editable in place. */
 export function SearchPriority() {
   const profile = useProfile()
   return (

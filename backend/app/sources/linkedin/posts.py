@@ -4,10 +4,12 @@ the saved login; skipped when LinkedIn isn't connected.
 - Searches, newest first (``post_queries``): 5 aimed at Google Forms (``FORM_QUERIES``, the past
   week, read further with more scrolls), then one ``hiring <role>`` search per role (the past 24
   hours). Up to ``POST_MAX_PAGE_LOADS`` page loads per run.
-- A post matches when it isn't a course or training advert, a line that isn't about an internship
-  names one of the roles, any experience it states starts at 3 years or less, its location (if it
-  names one) is a preferred location, and it was posted today - or, with a Google Form, within the
-  past 7 days (the candidate's choice on 2026-10-15).
+- A post matches when it isn't a course or training advert, its company isn't on the skip list
+  (``search_skip_companies``: the company in the author's headline, or the author), a line that isn't
+  about an internship or a senior role (``app.scanner.fit``, 2026-10-15) names one of the roles, any
+  experience it states starts at 3 years or less, its location (if it names one) is a preferred
+  location, and it was posted today - or, with a Google Form, within the past 7 days (the
+  candidate's choice on 2026-10-15).
 - Google Form links are found in the text and link targets; ``lnkd.in`` short links of posts that
   match otherwise are followed with a plain request (``resolve_link``, up to ``MAX_SHORT_LINKS`` per
   run, posts that mention a form first) to see whether they lead to a Google Form.
@@ -46,6 +48,7 @@ from app.scanner.matching import (
     parse_min_experience,
     priority,
 )
+from app.scanner.fit import senior_term, skip_listed
 from app.scanner.store import finish_scan
 from app.timeutils import to_utc
 from app.sources.linkedin import selectors as S
@@ -66,7 +69,7 @@ NOT_CONNECTED = "LinkedIn isn't connected, so hiring posts weren't searched. Con
 LOGIN_EXPIRED = "The saved LinkedIn login has expired. Connect again."
 SECURITY_CHECK = "LinkedIn asked for a security check. Connect again and complete it in the window."
 _FORM_WORDS = re.compile(r"\b(?:google\s*form|form\s*link|fill\s+(?:out\s+)?(?:this|the)\s+form|apply\s+here|forms?)\b", re.I)
-_LINE_SPLIT = re.compile(r"[\n•|;]+|(?<=[.!?])\s+")
+_LINE_SPLIT = re.compile(r"[\n•|;]+|(?<=[.!?])(?<![Ss][Rr]\.)\s+")  # "Sr. Java Developer" stays one line
 
 
 # Searches aimed at posts with a Google Form, read further (more scrolls) than the role searches.
@@ -84,8 +87,10 @@ LEFT_OUT = {
     "course": "a course or training ad",
     "date": "too old (emails: today only; forms: 7 days)",
     "role": "none of your roles",
+    "senior": "a senior role",
     "experience": "more experience than yours",
     "city": "another city",
+    "company": "on your skip list",
 }
 
 
@@ -132,16 +137,25 @@ def recent_enough(posted: datetime | None, now: datetime, *, has_form: bool) -> 
     return is_today(posted, now)
 
 
-def best_role(matcher: RoleMatcher, text: str) -> tuple[str, int] | None:
-    """The most important role named on a line that isn't about an internship."""
-    best = None
+def _role_lines(matcher: RoleMatcher, text: str):
+    """``(line, role)`` for each line that names one of the roles and isn't about an internship."""
     for line in _LINE_SPLIT.split(text):
-        if not line.strip() or is_internship(line):
-            continue
-        match = matcher.match(line)
-        if match is not None and (best is None or match[1] < best[1]):
+        if line.strip() and not is_internship(line) and (match := matcher.match(line)) is not None:
+            yield line, match
+
+
+def best_role(matcher: RoleMatcher, text: str) -> tuple[str, int] | None:
+    """The most important role named on a line that isn't about an internship or a senior role."""
+    best = None
+    for line, match in _role_lines(matcher, text):
+        if not senior_term(line) and (best is None or match[1] < best[1]):
             best = match
     return best
+
+
+def names_senior_role(matcher: RoleMatcher, text: str) -> bool:
+    """Whether a line naming one of the roles is for a senior role ("Senior Java Developer")."""
+    return any(senior_term(line) for line, _ in _role_lines(matcher, text))
 
 
 class LinkedInPostsScanner:
@@ -305,12 +319,15 @@ class LinkedInPostsScanner:
             return None, "contact"
         if is_course_ad(post.text):
             return None, "course"
+        headline_company = company_from_headline(post.headline)
+        if skip_listed([headline_company, post.author], prefs.skip_companies):
+            return None, "company"
         posted = estimate_posted_at(post.time_label, ctx.now)
         if not recent_enough(posted, ctx.now, has_form=bool(forms) or assume_form):
             return None, "date"
         role = best_role(matcher, post.text)
         if role is None:
-            return None, "role"
+            return None, "senior" if names_senior_role(matcher, post.text) else "role"
         min_experience = parse_min_experience(post.text)
         bucket = prefs.experience_bucket(min_experience)
         if bucket is None:
@@ -323,7 +340,7 @@ class LinkedInPostsScanner:
             location_index = len(prefs.locations) - 1  # no location named
         else:
             location = prefs.locations[location_index]
-        company = company_from_headline(post.headline) or post.author or "LinkedIn post"
+        company = headline_company or post.author or "LinkedIn post"
         return Candidate(
             platform=self.platform,
             external_id=post.urn,

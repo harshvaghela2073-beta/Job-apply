@@ -50,6 +50,7 @@ def test_load_prefs_reads_profile_fields(session):
     make_field(session, key="search_locations", value="Remote", position=3)
     prefs = load_prefs(session)
     assert (prefs.experience_years, prefs.roles, prefs.locations) == ((2, 1), ("Golang Developer",), ("Remote",))
+    assert (prefs.skills, prefs.skip_companies) == ((), ())  # optional fields
 
 
 def test_load_prefs_missing(session):
@@ -151,13 +152,11 @@ def test_match_title_experience_rules():
     # Years in the title are used when the platform gives none.
     assert match_title(PREFS, MATCHER, "AI Backend Developer 4-7 years") is None
     assert match_title(PREFS, MATCHER, "Software Engineer | 2 to 4 years").bucket == 1
-    # Without any experience figure, senior titles are skipped; the fallback bucket is used.
-    assert match_title(PREFS, MATCHER, "Senior Software Engineer") is None
-    assert match_title(PREFS, MATCHER, "Lead Backend Engineer") is None
+    # Without any experience figure, the fallback bucket is used, else the last one.
     assert match_title(PREFS, MATCHER, "Golang Developer", fallback_bucket=1).bucket == 1
-    # Staff/Principal/Architect are always skipped, even with a small figure.
-    assert match_title(PREFS, MATCHER, "Staff Software Engineer", min_experience=0) is None
-    # A senior title with an explicit small figure is kept (the platform says it fits).
+    assert match_title(PREFS, MATCHER, "Golang Developer").bucket == 2
+    # Senior titles are a job-fit rule since 2026-10-15 (app.scanner.fit, tests/test_fit.py): every
+    # senior title is left out there, so the scanners can count them.
     assert match_title(PREFS, MATCHER, "Senior Backend Developer", min_experience=2).bucket == 1
 
 

@@ -412,8 +412,11 @@ CONNECT_TEXT_NAME = r"^\s*connect\s*$"  # a Connect button without an aria-label
 MORE_NAME = r"^\s*more(?: actions)?\s*$"
 PENDING_NAME = r"^\s*pending\b"  # "Pending, click to withdraw invitation sent to <Name>"
 MENU_ROLES = ("button", "menuitem")  # the "More" menu's items
+# The 2026-10-15 layout: Connect is a link to the invitation page of that person (its vanityName).
+CUSTOM_INVITE_LINK = "a[href*='/preload/custom-invite/']"
+NOT_INVITE_DIALOG_TESTIDS = ("popover-floating",)  # the search box's suggestions
 # The invitation dialog: "Add a note to your invitation?" -> "Add a note" / "Send without a note".
-INVITE_DIALOG = ("div[role='dialog']", "[role='alertdialog']", ".artdeco-modal", ".send-invite")
+INVITE_DIALOG = ("div[role='dialog']", "[role='alertdialog']", ".artdeco-modal", ".send-invite", "dialog[open]")
 INVITE_DIALOG_SCOPE = ", ".join(INVITE_DIALOG)
 ADD_NOTE_NAME = r"^\s*add a note\s*$"
 SEND_NAME = r"^\s*(?:send invitation|send now|send)\s*$"  # never "Send without a note"
