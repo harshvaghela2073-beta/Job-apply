@@ -20,14 +20,39 @@ fewer, better-fitting applications (docs/API_CONTRACT.md, "Job fit").
 Where they apply: at search time (``linkedin_jobs``, ``naukri_jobs``: title rules and skip list, the
 job isn't stored and the run message counts it), at apply time (both platforms' ``skip_reason``: all
 four) and for hiring posts (skip list on the post's company, senior rule on the line naming the role).
+
+- **Salary (2026-10-21):** at apply time a stated salary whose top is below the lower bound of the
+  profile field ``search_salary_lpa`` ("16-18 LPA" -> 16) is skipped; without that field the current
+  CTC is used (``target_salary_lpa``).
 """
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from app.scanner.matching import SearchPrefs, split_list
 
 MIN_SKILLS = 2
+SALARY_TARGET_KEY = "search_salary_lpa"  # the candidate's target, e.g. "16-18 LPA" (2026-10-21)
+SEARCH_SALARY_KEY = SALARY_TARGET_KEY
+_AMOUNT = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+# ---------------------------------------------------------------------------
+# Salary target
+
+
+def target_salary_lpa(fields_or_value: Mapping[str, str] | str | None) -> float | None:
+    """The lower bound of the target salary in lakhs a year, from the profile fields (key -> value)
+    or the ``search_salary_lpa`` value itself: "16-18 LPA" -> 16.0, "16,00,000" -> 16.0 (rupees);
+    None when it isn't set or has no positive number."""
+    value = fields_or_value.get(SALARY_TARGET_KEY) if isinstance(fields_or_value, Mapping) else fields_or_value
+    match = _AMOUNT.search(value or "")
+    if match is None:
+        return None
+    amount = float(match.group().replace(",", ""))
+    if amount >= 1000:  # written in rupees
+        amount /= 100_000
+    return amount if amount > 0 else None
+
 
 # ---------------------------------------------------------------------------
 # Skills

@@ -103,16 +103,22 @@ CONTENT_SEARCH_PAST_WEEK = ("datePosted", '"past-week"')
 FORM_POST_MAX_AGE_DAYS = 7
 POST_SCROLLS = 1  # extra batches loaded by scrolling, each counted as a page load
 POST_FORM_SCROLLS = 3  # more batches for the Google Form searches (2026-10-15)
-# Page loads per post scan (searches and scrolls), instead of the shared SCAN_MAX_PAGE_LOADS (20):
-# 5 form searches x 4 + 8 role searches x 2 = 36.
-POST_MAX_PAGE_LOADS = 40
+# The home feed, read before the searches (2026-10-21): the first batch and FEED_SCROLLS more.
+FEED_URL = "https://www.linkedin.com/feed/"
+FEED_SCROLLS = 6
+# Page loads per post scan (feed, searches and scrolls), instead of the shared SCAN_MAX_PAGE_LOADS
+# (20): the feed 7 + 5 form searches x 4 + 8 role searches x 2 = 43.
+POST_MAX_PAGE_LOADS = 44
 # LinkedIn's post search as of 2026-10-14 ("SDUI"): generated class names, no data-urn. Each post is a
 # div whose componentkey is "expanded<id>FeedType_FLAGSHIP_SEARCH"; its text is in the expandable text box.
-SDUI_POST = "div[componentkey^='expanded']"
+# The home feed's markup isn't on a saved page yet (needs a live check): any componentkey with a
+# "FeedType_" of any kind counts, with the same text box; then the older layouts' parsers.
+SDUI_POST = "[componentkey*='FeedType_']"
 SDUI_POST_TEXT = ("[data-testid='expandable-text-box']",)
 # The "… more" button inside the text box (the whole text is already in the box).
 SDUI_POST_MORE = ("[data-testid='expandable-text-button']", "button")
 POST_WAIT = "[data-testid='expandable-text-box'], div.feed-shared-update-v2, [data-urn^='urn:li:activity']"
+FEED_WAIT = POST_WAIT + ", [componentkey*='FeedType_']"
 POST_CONTAINER = (
     "div.feed-shared-update-v2[data-urn]",
     "div[data-urn*='urn:li:activity:']",
@@ -414,6 +420,7 @@ PENDING_NAME = r"^\s*pending\b"  # "Pending, click to withdraw invitation sent t
 MENU_ROLES = ("button", "menuitem")  # the "More" menu's items
 # The 2026-10-15 layout: Connect is a link to the invitation page of that person (its vanityName).
 CUSTOM_INVITE_LINK = "a[href*='/preload/custom-invite/']"
+CUSTOM_INVITE_URL = "https://www.linkedin.com/preload/custom-invite/?vanityName={slug}"
 NOT_INVITE_DIALOG_TESTIDS = ("popover-floating",)  # the search box's suggestions
 # The invitation dialog: "Add a note to your invitation?" -> "Add a note" / "Send without a note".
 INVITE_DIALOG = ("div[role='dialog']", "[role='alertdialog']", ".artdeco-modal", ".send-invite", "dialog[open]")

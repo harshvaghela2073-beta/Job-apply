@@ -327,7 +327,8 @@ def test_sends_notes_to_post_authors_and_the_hiring_team(client, fake_browser):
                      recipient_profile_url="https://in.linkedin.com/in/Deepak-K?trk=x", status=OutreachStatus.rejected)
         li_job(session, 5, priority=1, status=JobStatus.skipped, contact_name="Skip Me",
                contact_profile_url="https://www.linkedin.com/in/skip-me/")
-        li_job(session, 6, priority=1, found_at=ten_am_today() - timedelta(days=1, hours=2), contact_name="Old",
+        # Older than the 7 days the notes look back (2026-10-21).
+        li_job(session, 6, priority=1, found_at=ten_am_today() - timedelta(days=8), contact_name="Old",
                contact_profile_url="https://www.linkedin.com/in/old/")
         ids = {"post": post.id, "easy": easy.id, "team": team.id}
         team_url = team.url
@@ -571,8 +572,17 @@ def test_people_blocked_by_the_layout_bug_are_tried_once_more(session):
     after = datetime(2026, 10, 15, 13, 0, tzinfo=timezone.utc)
     note("https://www.linkedin.com/in/blocked-by-bug/", f"Not sent: {NO_CONNECT}", before)
     note("https://www.linkedin.com/in/really-no-connect/", f"Not sent: {NO_CONNECT}", after)
-    note("https://www.linkedin.com/in/other-failure/", "Not sent: The note box didn't open.", before)
+    note("https://www.linkedin.com/in/other-failure/", "Not sent: The note couldn't be filled in.", before)
+    # The invitation in LinkedIn's hidden frame (fixed 2026-10-21 12:30 UTC): tried once more too.
+    frame_before = datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc)
+    frame_after = datetime(2026, 10, 21, 13, 0, tzinfo=timezone.utc)
+    note("https://www.linkedin.com/in/hidden-frame/", "The invitation dialog didn't open after Connect.", frame_before)
+    note("https://www.linkedin.com/in/note-box/", "The note box didn't open; nothing was sent.", frame_before)
+    note("https://www.linkedin.com/in/frame-after-fix/", "The invitation dialog didn't open after Connect.", frame_after)
     session.commit()
     contacted = contacted_profiles(session)
-    assert "https://www.linkedin.com/in/blocked-by-bug/" not in contacted
-    assert {"https://www.linkedin.com/in/really-no-connect/", "https://www.linkedin.com/in/other-failure/"} <= contacted
+    retried = {"https://www.linkedin.com/in/blocked-by-bug/", "https://www.linkedin.com/in/hidden-frame/",
+               "https://www.linkedin.com/in/note-box/"}
+    assert not (retried & contacted)
+    assert {"https://www.linkedin.com/in/really-no-connect/", "https://www.linkedin.com/in/other-failure/",
+            "https://www.linkedin.com/in/frame-after-fix/"} <= contacted

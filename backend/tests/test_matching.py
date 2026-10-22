@@ -98,6 +98,66 @@ def test_role_synonyms(title, role):
     assert (match[0] if match else None) == role
 
 
+# The candidate's roles of 2026-10-21, in their order.
+CANDIDATE_MATCHER = RoleMatcher(
+    ("SDE", "Software Development Engineer", "Backend Engineer", "Java Developer", "Full Stack Engineer", "SDE2", "SDE1")
+)
+
+
+@pytest.mark.parametrize(
+    "title, role",
+    [
+        # SDE and Software Development Engineer are one role; a level goes to SDE1 / SDE2.
+        ("SDE", "SDE"),
+        ("Software Development Engineer", "SDE"),
+        ("Software Engineer", "SDE"),
+        ("Software Developer - Payments", "SDE"),
+        ("SDE 1", "SDE1"),
+        ("SDE-1", "SDE1"),
+        ("SDE I", "SDE1"),
+        ("Software Development Engineer I", "SDE1"),
+        ("SDE 2", "SDE2"),
+        ("SDE II", "SDE2"),
+        ("SDE-II (Platform)", "SDE2"),
+        ("Software Development Engineer II", "SDE2"),
+        ("Software Development Engineer - II", "SDE2"),
+        # Backend Engineer ~ Backend Developer ~ Back End Engineer
+        ("Backend Engineer", "Backend Engineer"),
+        ("Backend Developer", "Backend Engineer"),
+        ("Back End Engineer", "Backend Engineer"),
+        ("Back-end Developer (Golang)", "Backend Engineer"),
+        # Java Developer ~ Java Engineer
+        ("Java Developer", "Java Developer"),
+        ("Java Engineer", "Java Developer"),
+        ("Core Java Developer", "Java Developer"),
+        ("Java Spring Boot Developer", "Java Developer"),
+        # Full Stack Engineer ~ Full Stack Developer ~ Fullstack
+        ("Full Stack Engineer", "Full Stack Engineer"),
+        ("Full Stack Developer", "Full Stack Engineer"),
+        ("Fullstack Developer", "Full Stack Engineer"),
+        ("Full-Stack Engineer", "Full Stack Engineer"),
+        ("Java Fullstack", "Full Stack Engineer"),
+        ("Python Developer", None),
+        ("Data Engineer", None),
+        ("DevOps Engineer", None),
+        ("Business Development Executive", None),
+    ],
+)
+def test_candidate_role_variants(title, role):
+    match = CANDIDATE_MATCHER.match(title)
+    assert (match[0] if match else None) == role
+
+
+@pytest.mark.parametrize("title", ["Java Developer", "Java Engineer", "Java Backend Developer", "Java Software Engineer"])
+def test_java_developer_variants(title):
+    assert RoleMatcher(["Java Developer"]).match(title) == ("Java Developer", 0)
+
+
+@pytest.mark.parametrize("title", ["SDE", "SDE-1", "SDE II", "Software Development Engineer (II)", "Software Engineer"])
+def test_a_bare_sde_role_matches_every_level(title):
+    assert RoleMatcher(["SDE"]).match(title) == ("SDE", 0)
+
+
 def test_role_priority_order():
     # Several roles match: the first in priority order wins.
     assert MATCHER.match("Java Backend Developer") == ("Java Developer", 3)

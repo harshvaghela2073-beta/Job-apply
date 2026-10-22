@@ -37,6 +37,7 @@ Selectors and texts live in ``selectors.py``; they need a live check.
 """
 
 import logging
+from urllib.parse import quote
 import random
 import re
 from collections.abc import Callable
@@ -45,7 +46,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, not_
+from sqlalchemy import and_, not_, or_
 from sqlmodel import Session, col, select
 
 from app.browser import BrowserSession, BrowserUnavailable
@@ -261,21 +262,24 @@ def send_connection_note(
     sent_before = view.sent
     if view.weekly_limit:
         return attempt(NoteResult.weekly_limit, WEEKLY_LIMIT_STOP + ".")
-    if not _click_connect(browser, name, seen, slug):
-        # Nothing readable on the top card usually means a changed page layout: keep the page.
-        saved = "" if view.buttons else capture_failure(browser, kind)
-        return attempt(NoteResult.no_connect, NO_CONNECT + saved)
-
-    view = _wait_for(
-        browser, lambda v: v.dialog or v.weekly_limit or (v.sent and not sent_before) or v.pending, DIALOG_WAIT_SECONDS, seen, slug
-    )
-    invite_href = read_profile(browser.html(), slug).connect_href
-    if not (view.dialog or view.weekly_limit or view.sent or view.pending) and invite_href:
+    if view.new_layout and slug:
         # The 2026-10-15 layout opens the invitation inside LinkedIn's hidden "preload" frame, which the
-        # page's HTML doesn't show: open the invitation page itself instead.
-        browser.goto(invite_href, timeout=40)
+        # page's HTML doesn't show (129 notes failed that way on 2026-10-20, Connect also sits under
+        # "More" for many people): open that person's invitation page itself instead of clicking.
+        browser.goto(S.CUSTOM_INVITE_URL.format(slug=quote(slug)), timeout=40)
         view = _wait_for(
             browser, lambda v: v.dialog or v.note_box or v.weekly_limit or v.pending, DIALOG_WAIT_SECONDS, seen, slug
+        )
+        if not (view.dialog or view.note_box or view.weekly_limit or view.pending):
+            return attempt(NoteResult.no_connect, NO_CONNECT + capture_failure(browser, kind))
+    else:
+        if not _click_connect(browser, name, seen, slug):
+            # Nothing readable on the top card usually means a changed page layout: keep the page.
+            saved = "" if view.buttons else capture_failure(browser, kind)
+            return attempt(NoteResult.no_connect, NO_CONNECT + saved)
+        view = _wait_for(
+            browser, lambda v: v.dialog or v.weekly_limit or (v.sent and not sent_before) or v.pending,
+            DIALOG_WAIT_SECONDS, seen, slug,
         )
     if view.weekly_limit:
         _dismiss(browser)
@@ -402,15 +406,28 @@ def build_note(templates: list[Template], job: JobInfo | Job | None, name: str |
 # Until this moment every "no Connect button" came from LinkedIn's new profile layout, which the tool
 # couldn't read (fixed on 2026-10-15): those people are tried once more.
 NO_CONNECT_FIXED_AT = datetime(2026, 10, 15, 12, 20, tzinfo=UTC)
+# Until this moment the invitation opened inside LinkedIn's hidden frame and the tool couldn't see it
+# (fixed on 2026-10-21): notes that failed that way are tried once more too.
+INVITE_FRAME_FIXED_AT = datetime(2026, 10, 21, 12, 30, tzinfo=UTC)
+INVITE_FRAME_ERRORS = ("The invitation dialog didn't open", "The note box didn't open", "something went wrong")
+# Recruiters of jobs found this many days back are written to (today's first).
+OUTREACH_JOB_DAYS = 7
 
 
 def contacted_profiles(session: Session) -> set[str]:
     """Profiles that already have a connection note or InMail (any status): never written to again,
     except a "no Connect button" failure from before ``NO_CONNECT_FIXED_AT`` (tried once more)."""
-    layout_bug = and_(
-        OutreachMessage.status == OutreachStatus.failed,
-        col(OutreachMessage.error).contains(NO_CONNECT),
-        col(OutreachMessage.created_at) < NO_CONNECT_FIXED_AT,
+    layout_bug = or_(
+        and_(
+            OutreachMessage.status == OutreachStatus.failed,
+            col(OutreachMessage.error).contains(NO_CONNECT),
+            col(OutreachMessage.created_at) < NO_CONNECT_FIXED_AT,
+        ),
+        and_(
+            OutreachMessage.status == OutreachStatus.failed,
+            or_(*(col(OutreachMessage.error).contains(text) for text in INVITE_FRAME_ERRORS)),
+            col(OutreachMessage.created_at) < INVITE_FRAME_FIXED_AT,
+        ),
     )
     urls = session.exec(
         select(OutreachMessage.recipient_profile_url).where(
@@ -561,7 +578,7 @@ class LinkedInOutreach:
                 )
             remaining = min(OUTREACH_MAX_PER_RUN, OUTREACH_DAILY_CAP - today, month_cap - month)
             contacted = contacted_profiles(session)
-            start, _ = local_day_bounds(ctx.now)
+            start, _ = local_day_bounds(to_utc(ctx.now) - timedelta(days=OUTREACH_JOB_DAYS - 1))
             todays = session.exec(
                 select(Job)
                 .where(
@@ -569,7 +586,8 @@ class LinkedInOutreach:
                     col(Job.status).in_(OUTREACH_JOB_STATUSES),
                     col(Job.found_at) >= start,
                 )
-                .order_by(col(Job.priority).asc().nulls_last(), col(Job.found_at).desc(), col(Job.id))
+                # Newest jobs first (their recruiters are hiring now), then the most important.
+                .order_by(col(Job.found_at).desc(), col(Job.priority).asc().nulls_last(), col(Job.id))
             ).all()
             jobs = [JobInfo.of(job) for job in todays]
             unchecked = {job.id for job in todays if job.contact_checked_at is None}

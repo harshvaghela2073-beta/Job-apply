@@ -19,6 +19,24 @@ RESULTS_PER_PAGE = 20
 REMOTE_PARAM = ("wfhType", "2")
 SORT_BY_DATE = ("sort", "f")
 
+# Search filters (2026-10-21). The location is the confirmed "-jobs-in-<city>" path plus ``l``. The
+# experience, salary and freshness filters weren't on any saved page, so they are left out of the
+# URL (None) until a live check of a filtered search page confirms their names. Believed to be:
+# experience=<years>, ctcFilter=<band>, jobAge=1. Set one here to send it.
+# Turned on 2026-10-21: without it 34 of a run's 59 jobs from today asked for 3+ years.
+EXPERIENCE_PARAM: str | None = "experience"  # the bucket's minimum years
+SALARY_PARAM: str | None = None  # "ctcFilter": one value per band from SALARY_BANDS
+FRESHNESS_PARAM: tuple[str, str] | None = ("jobAge", "1")  # posted in the last day (2026-10-21)
+# Naukri's salary bands in lakhs a year, sent as "<low>to<high>" (needs the same live check).
+SALARY_BANDS = ((0, 3), (3, 6), (6, 10), (10, 15), (15, 25), (25, 50), (50, 75), (75, 100))
+
+# The logged-in "Recommended Jobs" list: the header's "Jobs" link on the saved job pages of
+# 2026-10-14..20. How it loads its jobs isn't known yet (needs a live check): a captured response
+# whose URL has RECOMMENDED_API (believed to be /jobapi/v2/search/recom-jobs) is read when it holds
+# a ``jobDetails`` list, else the job cards. A wrong guess only means the cards are read.
+RECOMMENDED_URL = "https://www.naukri.com/mnjuser/recommendedjobs"
+RECOMMENDED_API = "recom-jobs"
+
 LOGIN_URL = "https://www.naukri.com/nlogin/login"
 CONFIRM_URL = "https://www.naukri.com/mnjuser/homepage"
 COOKIE_DOMAIN = "naukri.com"

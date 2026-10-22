@@ -14,6 +14,7 @@ from app.scanner.fit import (
     senior_term,
     skip_list,
     skip_listed,
+    target_salary_lpa,
     title_reason,
     too_few_skills,
 )
@@ -273,4 +274,30 @@ def test_profile_fields_are_loaded(session):
     assert (prefs.skills, prefs.skip_companies) == (("Java", "Golang"), ("Jobgether", "Scoutit"))
     rules = naukri_rules(session)
     assert (rules.skills, rules.skip_companies) == (("Java", "Golang"), ("Jobgether", "Scoutit"))
-    assert linkedin_rules(session) == rules
+    linkedin = linkedin_rules(session)
+    assert (linkedin.min_salary_lpa, linkedin.skills, linkedin.skip_companies) == (
+        rules.min_salary_lpa, rules.skills, rules.skip_companies
+    )
+
+
+# ---------------------------------------------------------------------------
+# Salary target (2026-10-21)
+
+
+@pytest.mark.parametrize(
+    ("value", "lpa"),
+    [
+        ("16-18 LPA", 16.0),
+        ("16 LPA", 16.0),
+        ("16.5 - 18 Lakhs", 16.5),
+        ("Rs 16 to 18 lacs", 16.0),
+        ("16,00,000 - 18,00,000", 16.0),
+        ("1600000", 16.0),
+        ("0 LPA", None),
+        ("TBD", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_target_salary_lpa(value, lpa):
+    assert target_salary_lpa(value) == lpa

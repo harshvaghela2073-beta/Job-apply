@@ -7,6 +7,7 @@ from app.sources.naukri.apply import NaukriApplier
 from app.sources.naukri.screening import (
     ApplyRules,
     JobFacts,
+    load_rules,
     looks_like_person,
     matching_skills,
     parse_job_facts,
@@ -84,6 +85,39 @@ def test_skip_reason(job, reason_start):
         assert reason is None
     else:
         assert reason is not None and reason.startswith(reason_start)
+
+
+RULES_WITH_TARGET = ApplyRules(min_salary_lpa=12.0, skills=MY_SKILLS, target_salary_lpa=16.0)
+
+
+@pytest.mark.parametrize(
+    ("salary", "reason"),
+    [
+        ("10-15 Lacs P.A.", "Salary 10-15 Lacs P.A. is below your target 16 LPA."),
+        ("12-15.5 Lacs P.A.", "Salary 12-15.5 Lacs P.A. is below your target 16 LPA."),
+        ("12-16 Lacs P.A.", None),  # tops out at the target
+        ("15-25 Lacs P.A.", None),
+        ("Not Disclosed", None),  # no stated salary: kept
+        ("", None),
+    ],
+)
+def test_salary_below_the_target(salary, reason):
+    """With ``search_salary_lpa`` (2026-10-21) its lower bound is the bar, not the current CTC."""
+    assert skip_reason(RULES_WITH_TARGET, facts(salary=salary)) == reason
+
+
+def test_target_replaces_the_current_ctc():
+    above_ctc = ApplyRules(min_salary_lpa=20.0, skills=MY_SKILLS, target_salary_lpa=16.0)
+    assert skip_reason(above_ctc, facts(salary="15-18 Lacs P.A.")) is None
+    no_target = ApplyRules(min_salary_lpa=20.0, skills=MY_SKILLS)
+    assert skip_reason(no_target, facts(salary="15-18 Lacs P.A.")) == "Salary 15-18 Lacs P.A. is below your current 20 LPA."
+
+
+def test_rules_read_the_salary_target(session):
+    make_field(session, key="current_ctc", label="CTC", section="Current job", value="12 LPA", position=1)
+    assert (load_rules(session).min_salary_lpa, load_rules(session).target_salary_lpa) == (12.0, None)
+    make_field(session, key="search_salary_lpa", label="Target salary", section="Job search", value="16-18 LPA", position=2)
+    assert (load_rules(session).min_salary_lpa, load_rules(session).target_salary_lpa) == (12.0, 16.0)
 
 
 def test_stored_values_fill_in_for_the_page():
@@ -165,6 +199,29 @@ def test_applier_records_skipped_jobs_without_clicking(client, settings, fake_br
         stored = session.get(Job, job_id)
         assert stored.status == JobStatus.skipped
         assert stored.status_reason.startswith("Not auto-applied: Salary 2.5-4.5 Lacs P.A. is below")
+
+
+def test_applier_uses_the_salary_target(client, settings, fake_browser):
+    connect_naukri(client, settings)
+    with Session(client.app.state.engine) as session:
+        set_flag(session, AUTO_APPLY_NAUKRI, True)
+        make_field(session, key="current_ctc", label="CTC", section="Current job", value="2 LPA")
+        make_field(session, key="search_salary_lpa", label="Target salary", section="Job search", value="16-18 LPA", position=2)
+        make_field(session, key="skills", label="Skills", section="Skills", value=", ".join(MY_SKILLS), position=3)
+        job = make_job(
+            session, platform=Platform.naukri, external_id="nk-9", url="https://www.naukri.com/job-listings-java-9",
+            apply_type=ApplyType.one_click, status=JobStatus.found, priority=0, title="Java Developer",
+        )
+        job_id = job.id
+    page_html = JOB_PAGE.replace("</section>\n<div", '<button id="apply-button">Apply</button></section>\n<div', 1)
+    page_html = page_html.replace("2.5-4.5 Lacs P.A.", "8-12 Lacs P.A.").replace("MNC's", "Acme Software")
+    fake_browser.routes = [("job-listings", page("https://www.naukri.com/job-listings-java-9", page_html))]
+
+    outcome = NaukriApplier().run(make_ctx(client.app))
+
+    assert fake_browser.clicks == [] and outcome.message == "Applied to 0, 1 skipped by your rules."
+    with Session(client.app.state.engine) as session:
+        assert session.get(Job, job_id).status_reason == "Not auto-applied: Salary 8-12 Lacs P.A. is below your target 16 LPA."
 
 
 def test_applier_skips_jobs_that_dont_fit(client, settings, fake_browser):

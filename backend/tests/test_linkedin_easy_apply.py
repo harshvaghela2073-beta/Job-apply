@@ -270,21 +270,25 @@ def test_value_rejected_again_is_unanswerable(fake_browser):
     always_wrong = lambda value: "Enter a decimal number larger than 5.0"  # noqa: E731
     form = scripted(fake_browser, contact_step(), questions_step(experience_validate=always_wrong), review_step())
     attempt = apply_easy(browser_for(fake_browser), JOB_URL, BOOK)
-    assert attempt.result == ApplyResult.questionnaire
+    assert attempt.result == ApplyResult.skipped and attempt.clicked
     assert attempt.questions == ["How many years of work experience do you have?"]
     assert not form.submitted and form.discarded and "Submit application" not in form.clicks
 
 
-def test_unanswerable_required_field_discards_and_never_submits(fake_browser):
+def test_unanswerable_required_field_skips_the_job_and_never_submits(fake_browser):
+    """2026-10-21: a required question nobody saved an answer for skips the job (not left waiting)."""
     relocate = FakeField("Are you willing to work night shifts?", "radio", options=["Yes", "No"])
     sponsor = FakeField("Which shift do you prefer?", "select", options=["Select an option", "Morning", "Night"])
     optional = FakeField("LinkedIn profile URL", "text", required=False)
     form = scripted(fake_browser, contact_step(), questions_step(relocate, sponsor, optional), review_step())
     attempt = apply_easy(browser_for(fake_browser), JOB_URL, BOOK)
 
-    assert attempt.result == ApplyResult.questionnaire
+    assert attempt.result == ApplyResult.skipped
     assert attempt.questions == ["Are you willing to work night shifts?", "Which shift do you prefer?"]
-    assert "nothing was sent" in attempt.detail
+    assert attempt.detail == (
+        'The form asks "Are you willing to work night shifts?" and "Which shift do you prefer?", '
+        "which have no saved answer."
+    )
     assert not form.submitted and form.discarded
     assert form.clicks[-2:] == ["Dismiss", "Discard"] and "Submit application" not in form.clicks
     assert relocate.value == "" and sponsor.value == ""  # never guessed
@@ -309,7 +313,7 @@ def test_new_layout_discard_through_the_confirmation_dialog(fake_browser):
     form = scripted(fake_browser, contact_step(), questions_step(relocate), review_step())
     form.sdui = True
     attempt = apply_easy(browser_for(fake_browser), JOB_URL, BOOK)
-    assert attempt.result == ApplyResult.questionnaire and not form.submitted and form.discarded
+    assert attempt.result == ApplyResult.skipped and not form.submitted and form.discarded
     assert form.clicks[-2:] == ["Dismiss", "Discard"]
 
 
@@ -484,9 +488,13 @@ def test_applier_order_caps_and_pauses(client, fake_browser):
     outcome = applier.run(make_ctx(client.app))
 
     opened = [url for url in fake_browser.visited if "/jobs/view/" in url]
-    assert opened == [urls[n] for n in ("consultancy", "first", "questions", "second", "third")]
+    # Then the company-site job's page, for its company link (2026-10-21).
+    assert opened == [urls[n] for n in ("consultancy", "first", "questions", "second", "third", "company_site")]
     assert (outcome.status, outcome.found, outcome.new) == (ScanStatus.ok, 5, 3)
-    assert outcome.message == "Applied to 3, 1 skipped by your rules, 1 need your answers (questions without a template)."
+    assert outcome.message == (
+        "Applied to 3, 1 skipped by your rules, 1 skipped for a question without a saved answer. "
+        "Found company links for 0 jobs."
+    )
     # A pause after each application that opened the form, none after the skipped first job.
     assert applier.pauses == [45.0, 45.0, 45.0]
     assert not forms["consultancy"].clicks and not forms["sixth"].clicks
@@ -494,7 +502,7 @@ def test_applier_order_caps_and_pauses(client, fake_browser):
     with Session(engine) as session:
         status = {name: session.get(Job, ids[name]).status for name in ids}
         assert status == {
-            "consultancy": JobStatus.skipped, "first": JobStatus.applied, "questions": JobStatus.needs_manual,
+            "consultancy": JobStatus.skipped, "first": JobStatus.applied, "questions": JobStatus.skipped,
             "second": JobStatus.applied, "third": JobStatus.applied, "sixth": JobStatus.found,
             "company_site": JobStatus.found,
         }
@@ -615,8 +623,11 @@ def test_apply_endpoint_records_unanswered_questions(client, fake_browser):
     relocate = FakeField("Are you willing to work night shifts?", "radio", options=["Yes", "No"])
     scripted(fake_browser, contact_step(), questions_step(relocate), review_step(), url=url)
     body = client.post(f"/api/jobs/{job_id}/apply").json()
-    assert body["result"] == "questionnaire" and body["questions"] == ["Are you willing to work night shifts?"]
-    assert body["job"]["status"] == "needs_manual"
+    assert body["result"] == "skipped" and body["questions"] == ["Are you willing to work night shifts?"]
+    assert body["job"]["status"] == "skipped"
+    assert body["job"]["status_reason"] == (
+        'Not auto-applied: The form asks "Are you willing to work night shifts?", which has no saved answer.'
+    )
     (question,) = client.get("/api/questions/unanswered").json()["items"]
     assert (question["platform"], question["job_id"]) == ("linkedin", job_id)
 

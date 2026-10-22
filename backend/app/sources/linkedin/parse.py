@@ -1,12 +1,15 @@
 """Parsers for LinkedIn's job search (logged in; the public cards are kept for reference) and
 logged-in hiring posts."""
 
+import hashlib
 import json
 import re
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, unquote, urlparse
+
+from bs4 import Tag
 
 from app.browser.driver import PageResult
 from app.sources.html import first, select_any, soup, text_of, visible_text
@@ -512,8 +515,11 @@ def _post_containers(doc):
     return list(found.values())
 
 
-_SDUI_KEY = re.compile(r"^expanded(.+?)FeedType_")
+# The post's id in its componentkey: "expanded<id>FeedType_FLAGSHIP_SEARCH" (the post search,
+# 2026-10-14); the home feed presumably uses other FeedType_ kinds (needs a live check).
+_SDUI_KEY = re.compile(r"^(?:expanded)?(.+?)FeedType_")
 _DEGREE = re.compile(r"\s*(?:•|·)?\s*(?:1st|2nd|3rd\+?|Verified Profile|Premium|Following)\b.*$", re.I)
+_TEXT_BOX = ", ".join(S.SDUI_POST_TEXT)
 
 
 def _actor_link(wrapper):
@@ -525,54 +531,104 @@ def _actor_link(wrapper):
     return None
 
 
+def _sdui_key(tag) -> str | None:
+    """The post id of an SDUI post wrapper (a componentkey with "FeedType_"), or None."""
+    key = tag.get("componentkey") if isinstance(tag, Tag) else None
+    if not key or "FeedType_" not in key:
+        return None
+    match = _SDUI_KEY.match(key)
+    return match.group(1) if match else key
+
+
+def _sdui_wrapper(box):
+    """The post around a text box: the nearest SDUI wrapper that shows an author and whose first text
+    box this is (an outer list or a reshare holds several), else the nearest wrapper."""
+    nearest = None
+    for parent in box.parents:
+        if _sdui_key(parent) is None:
+            continue
+        nearest = nearest or parent
+        if parent.select_one(_TEXT_BOX) is box and _actor_link(parent) is not None:
+            return parent
+    return nearest
+
+
+def _post_from(wrapper, box, urn: str) -> Post:
+    """A post from its block (author, headline, time) and its text box."""
+    actor = _actor_link(wrapper)
+    author = _DEGREE.sub("", " ".join(actor.get_text(" ").split())).strip() if actor else ""
+    href = (actor.get("href") or "") if actor else ""
+    author_url = normalize_profile_url(href) if "/in/" in href else None
+    if author_url:
+        link = author_url.rstrip("/") + "/recent-activity/all/"
+    elif href:
+        link = href.split("?")[0].rstrip("/") + "/posts/"
+    else:
+        link = None
+    # "… more" is a button inside the text box (saved page, 2026-10-14); the full text is there.
+    for button in box.select(", ".join(S.SDUI_POST_MORE)):
+        button.decompose()
+    flat = " ".join(wrapper.get_text(" ").split())
+    time_match = _COMPACT_TIME.search(flat)
+    headline = ""
+    if author and time_match:
+        start = flat.find(author)
+        if start >= 0:
+            between = flat[start + len(author) : time_match.start()]
+            headline = _DEGREE.sub("", between).strip(" •·") if not between.strip().startswith(("•", "·")) else re.sub(
+                r"^[\s•·]*(?:1st|2nd|3rd\+?)?\s*", "", between
+            ).strip()
+    return Post(
+        urn=urn,
+        text=box.get_text("\n", strip=True),
+        author=author,
+        headline=headline,
+        time_label=time_match.group(0) if time_match else None,
+        links=[a.get("href", "") for a in box.select("a[href]")],
+        author_url=author_url,
+        link=link,
+    )
+
+
 def _parse_sdui_posts(doc) -> list[Post]:
+    """Posts in the SDUI layout: each text box in its post wrapper (one post per wrapper)."""
     posts: list[Post] = []
     seen: set[str] = set()
-    for wrapper in doc.select(S.SDUI_POST):
-        key = _SDUI_KEY.match(wrapper.get("componentkey", ""))
-        box = first(wrapper, S.SDUI_POST_TEXT)
-        if key is None or box is None or key.group(1) in seen:
+    for box in doc.select(_TEXT_BOX):
+        wrapper = _sdui_wrapper(box)
+        key = _sdui_key(wrapper) if wrapper is not None else None
+        if key is None or key in seen:
             continue
-        seen.add(key.group(1))
-        actor = _actor_link(wrapper)
-        author = _DEGREE.sub("", " ".join(actor.get_text(" ").split())).strip() if actor else ""
-        href = (actor.get("href") or "") if actor else ""
-        author_url = normalize_profile_url(href) if "/in/" in href else None
-        if author_url:
-            link = author_url.rstrip("/") + "/recent-activity/all/"
-        elif href:
-            link = href.split("?")[0].rstrip("/") + "/posts/"
-        else:
-            link = None
-        # "… more" is a button inside the text box (saved page, 2026-10-14); the full text is there.
-        for button in box.select(", ".join(S.SDUI_POST_MORE)):
-            button.decompose()
-        flat = " ".join(wrapper.get_text(" ").split())
-        time_match = _COMPACT_TIME.search(flat)
-        headline = ""
-        if author and time_match:
-            start = flat.find(author)
-            if start >= 0:
-                between = flat[start + len(author) : time_match.start()]
-                headline = _DEGREE.sub("", between).strip(" •·") if not between.strip().startswith(("•", "·")) else re.sub(
-                    r"^[\s•·]*(?:1st|2nd|3rd\+?)?\s*", "", between
-                ).strip()
-        posts.append(
-            Post(
-                urn=f"sdui:{key.group(1)}",
-                text=box.get_text("\n", strip=True),
-                author=author,
-                headline=headline,
-                time_label=time_match.group(0) if time_match else None,
-                links=[a.get("href", "") for a in box.select("a[href]")],
-                author_url=author_url,
-                link=link,
-            )
-        )
+        seen.add(key)
+        posts.append(_post_from(wrapper, box, f"sdui:{key}"))
+    return posts
+
+
+def _parse_loose_posts(doc) -> list[Post]:
+    """Last resort for unknown markup (the home feed before a live check): each text box with the
+    largest block around it that holds no other text box and shows an author. The post's id is a
+    hash of its author and text, so the same post keeps it from run to run."""
+    posts: list[Post] = []
+    seen: set[str] = set()
+    for box in doc.select(_TEXT_BOX):
+        block = box
+        for parent in box.parents:
+            if parent.name in ("body", "html", "[document]") or len(parent.select(_TEXT_BOX)) > 1:
+                break
+            block = parent
+        if block is box or _actor_link(block) is None:
+            continue
+        post = _post_from(block, box, "")
+        post.urn = "text:" + hashlib.sha1(f"{post.author}|{post.text[:500]}".encode()).hexdigest()[:16]
+        if post.urn not in seen and post.text:
+            seen.add(post.urn)
+            posts.append(post)
     return posts
 
 
 def parse_posts(html: str) -> list[Post]:
+    """Hiring posts on a post search or the home feed: the SDUI layout, then the older layout (or any
+    element carrying a post URN), then loose text boxes."""
     doc = soup(html)
     sdui = _parse_sdui_posts(doc)
     if sdui:
@@ -605,7 +661,7 @@ def parse_posts(html: str) -> list[Post]:
                 author_url=post_author_url(container),
             )
         )
-    return posts
+    return posts or _parse_loose_posts(doc)
 
 
 def post_author_url(container) -> str | None:

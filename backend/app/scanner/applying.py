@@ -18,7 +18,8 @@ from app.timeutils import local_day_bounds, utcnow
 class ApplyResult(StrEnum):
     applied = "applied"
     already_applied = "already_applied"
-    # The form asks questions the tool has no answer for (never guessed).
+    # The form asks questions the tool can't read or fill. A question without a saved answer makes
+    # the job ``skipped`` instead (2026-10-21), with the question in ``ApplyAttempt.questions``.
     questionnaire = "questionnaire"
     company_site = "company_site"
     quota_reached = "quota_reached"
@@ -26,7 +27,15 @@ class ApplyResult(StrEnum):
     # No confirmation after applying, or (LinkedIn) the form couldn't be completed.
     no_confirmation = "no_confirmation"
     would_apply = "would_apply"  # dry run: everything up to the final click worked; nothing was sent
-    skipped = "skipped"  # one of the candidate's skip rules matched
+    skipped = "skipped"  # one of the candidate's skip rules matched, or a question has no saved answer
+
+
+def no_saved_answer(questions: list[str]) -> str:
+    """The skip reason when a form asks questions nobody saved an answer for (the candidate's choice on
+    2026-10-21: skip the job rather than leave it waiting)."""
+    quoted = [f'"{q}"' for q in questions]
+    asks = quoted[0] if len(quoted) == 1 else ", ".join(quoted[:-1]) + " and " + quoted[-1]
+    return f"The form asks {asks}, which {'has' if len(quoted) == 1 else 'have'} no saved answer."
 
 
 @dataclass
@@ -72,6 +81,8 @@ def record_attempt(session: Session, job: Job, attempt: ApplyAttempt) -> None:
     elif attempt.result == ApplyResult.skipped:
         job.status = JobStatus.skipped
         job.status_reason = f"Not auto-applied: {attempt.detail}"[:1000]
+        # Skipped for a question without a saved answer: answering it lets later jobs through.
+        add_unanswered_questions(session, attempt.questions, Platform(job.platform), job.id)
     elif attempt.result == ApplyResult.company_site:
         job.apply_type = ApplyType.company_site
         job.status_reason = attempt.detail

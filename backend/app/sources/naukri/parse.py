@@ -64,8 +64,21 @@ def parse_search_api(body: str) -> SearchPage | None:
         return None
     if not isinstance(data, dict) or not isinstance(data.get("jobDetails"), list):
         return None
+    total = data.get("noOfJobs")
+    logged_in = data.get("isLoggedIn")
+    return SearchPage(
+        jobs=_api_jobs(data["jobDetails"]),
+        total=total if isinstance(total, int) else None,
+        logged_in=logged_in if isinstance(logged_in, bool) else None,
+    )
+
+
+def _api_jobs(items: list) -> list[NaukriJob]:
+    """Jobs from a ``jobDetails`` list of Naukri's job API."""
     jobs = []
-    for item in data["jobDetails"]:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
         job_id = str(item.get("jobId") or "").strip()
         title = (item.get("title") or "").strip()
         if not job_id or not title:
@@ -98,13 +111,22 @@ def parse_search_api(body: str) -> SearchPage | None:
                 description=strip_tags(item.get("jobDescription")),
             )
         )
-    total = data.get("noOfJobs")
-    logged_in = data.get("isLoggedIn")
-    return SearchPage(
-        jobs=jobs,
-        total=total if isinstance(total, int) else None,
-        logged_in=logged_in if isinstance(logged_in, bool) else None,
-    )
+    return jobs
+
+
+def _job_lists(data, depth: int = 0):
+    """Every ``jobDetails`` list in a JSON value, nested up to 4 levels deep."""
+    if depth > 4:
+        return
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key == "jobDetails" and isinstance(value, list):
+                yield value
+            else:
+                yield from _job_lists(value, depth + 1)
+    elif isinstance(data, list):
+        for value in data:
+            yield from _job_lists(value, depth + 1)
 
 
 def parse_search_html(html: str) -> SearchPage:
@@ -153,6 +175,28 @@ def parse_search(result: PageResult) -> SearchPage:
             page = parse_search_api(response.body)
             if page is not None:
                 return page
+    return parse_search_html(result.html)
+
+
+def parse_recommended(result: PageResult) -> SearchPage:
+    """The logged-in "Recommended Jobs" list: jobs from any captured job-API JSON (a ``jobDetails``
+    list anywhere in it), else the job cards on the page (needs a live check)."""
+    jobs: list[NaukriJob] = []
+    seen: set[str] = set()
+    for response in result.captured:
+        if response.status != 200:
+            continue
+        try:
+            data = json.loads(response.body)
+        except (TypeError, ValueError):
+            continue
+        for items in _job_lists(data):
+            for job in _api_jobs(items):
+                if job.job_id not in seen:
+                    seen.add(job.job_id)
+                    jobs.append(job)
+    if jobs:
+        return SearchPage(jobs=jobs)
     return parse_search_html(result.html)
 
 

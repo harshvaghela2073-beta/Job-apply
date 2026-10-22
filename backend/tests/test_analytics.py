@@ -76,15 +76,16 @@ def test_analytics_counts(client, session):
             "email": counts(1, 1),
         },
         notes=2,
-        nk={"one_click": counts(3, 2)},  # no Naukri company-site job today: zeros
+        # The failed job isn't counted (2026-10-21); no Naukri company-site job today: zeros.
+        nk={"one_click": counts(2, 2)},
     )
     assert data["all"] == period(
         li={
-            "easy_apply": counts(5, 2),
+            "easy_apply": counts(4, 2),  # the skipped one isn't counted
             "company_site": counts(2, 1),
             "google_form": counts(1, 0),
             "email": counts(2, 1),
         },
         notes=3,
-        nk={"one_click": counts(3, 2), "company_site": counts(2, 1)},
+        nk={"one_click": counts(2, 2), "company_site": counts(2, 1)},
     )

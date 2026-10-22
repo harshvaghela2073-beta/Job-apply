@@ -4,8 +4,9 @@ A job is not applied to (status ``skipped``, with the reason) when any rule matc
 
 0. Job fit (2026-10-15, ``app.scanner.fit``): the company is on the skip list
    (``search_skip_companies``), or the title is for another stack or too senior.
-1. Salary: Naukri shows a salary whose top is below the candidate's current CTC (profile field
-   ``current_ctc``). A hidden salary ("Not disclosed") is fine.
+1. Salary: Naukri shows a salary whose top is below the lower bound of the candidate's target
+   (profile field ``search_salary_lpa``, "16-18 LPA" -> 16; 2026-10-21), or below the current CTC
+   (``current_ctc``) when there is no target. A hidden salary ("Not disclosed") is fine.
 2. Skills: fewer than 2 of the candidate's skills (profile field ``skills``) in the job's key skills,
    title and description. Checked only when the key skills are known.
 3. Fresher / internship-style: experience starts at 0 years and the text mentions internships,
@@ -23,7 +24,14 @@ from dataclasses import asdict, dataclass, field
 from sqlmodel import Session, select
 
 from app.models import ProfileField
-from app.scanner.fit import matching_skills, skip_list, title_reason, too_few_skills
+from app.scanner.fit import (
+    SEARCH_SALARY_KEY,
+    matching_skills,
+    skip_list,
+    target_salary_lpa,
+    title_reason,
+    too_few_skills,
+)
 from app.scanner.matching import SKILLS_KEY, SKIP_COMPANIES_KEY, parse_min_experience, split_list
 from app.sources.html import first, select_any, soup, text_of, visible_text
 from app.sources.naukri import selectors as S
@@ -46,9 +54,11 @@ class JobFacts:
 
 @dataclass(frozen=True)
 class ApplyRules:
-    min_salary_lpa: float | None  # skip when the shown salary's top is below this
+    min_salary_lpa: float | None  # the current CTC: skip when the shown salary's top is below this
     skills: tuple[str, ...]
     skip_companies: tuple[str, ...] = ()  # ``search_skip_companies``
+    # Lower bound of ``search_salary_lpa`` (2026-10-21); used instead of ``min_salary_lpa`` when set.
+    target_salary_lpa: float | None = None
 
 
 def _clean(text: str) -> str:
@@ -151,10 +161,14 @@ def skip_reason(rules: ApplyRules, facts: JobFacts, *, stored_company: str = "",
     if verdict:
         return verdict[1]
 
-    # 1. Salary below the current CTC.
+    # 1. Salary below the target (or, without one, the current CTC).
     top = salary_top_lpa(facts.salary)
-    if rules.min_salary_lpa is not None and top is not None and top < rules.min_salary_lpa:
-        return f"Salary {facts.salary} is below your current {rules.min_salary_lpa:g} LPA."
+    if top is not None:
+        if rules.target_salary_lpa is not None:
+            if top < rules.target_salary_lpa:
+                return f"Salary {facts.salary} is below your target {rules.target_salary_lpa:g} LPA."
+        elif rules.min_salary_lpa is not None and top < rules.min_salary_lpa:
+            return f"Salary {facts.salary} is below your current {rules.min_salary_lpa:g} LPA."
 
     # 2. Fewer than 2 of the candidate's skills in the key skills, title and description.
     stored_skills, _, stored_description = stored_text.partition(" · ")
@@ -191,4 +205,5 @@ def load_rules(session: Session) -> ApplyRules:
         min_salary_lpa=parse_lpa(fields.get("current_ctc")),
         skills=tuple(split_list(fields.get(SKILLS_KEY))),
         skip_companies=skip_list(fields.get(SKIP_COMPANIES_KEY)),
+        target_salary_lpa=target_salary_lpa(fields.get(SEARCH_SALARY_KEY)),
     )

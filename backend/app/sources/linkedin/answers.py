@@ -21,6 +21,20 @@ A numeric CTC field whose label names no unit (lakhs or rupees) and a numeric no
 that names no unit (days, weeks or months) are not answered from the profile: the unit would be a
 guess. "Years of experience with <skill>" questions are not total experience; they need a template.
 
+After the profile, the templates and the profile-based rules (``_infer``), the candidate's defaults of
+2026-10-21 (``_default``; source ``DEFAULT_SOURCE``, saved as templates like inferred answers):
+
+| Question                                                                 | Answer                      |
+|--------------------------------------------------------------------------|-----------------------------|
+| availability for interviews (any day or mode), background verification,  | Yes                         |
+| consent to a recruiter profile / communications, working from office or  |                             |
+| hybrid in Bengaluru (relocating / commuting within it: ``_infer``)       |                             |
+| a self-rating out of 5 or 10                                             | 4/5 (8/10) for your skills, |
+|                                                                          | 2/5 (4/10) otherwise        |
+
+Never a default: a question naming another city (relocating to Pune stays No), commitments such as
+a bond, shifts or pay, and free text. Without an answer the caller skips the job.
+
 Pure functions: no database or browser access except ``AnswerBook.load``.
 """
 
@@ -31,7 +45,7 @@ from dataclasses import dataclass, field
 from sqlmodel import Session, select
 
 from app.models import ProfileField, Template, TemplateKind
-from app.scanner.matching import city_aliases
+from app.scanner.matching import city_aliases, mentions_other_city
 
 MATCH_THRESHOLD = 0.85
 NOTICE_TEMPLATE = "notice period"
@@ -343,6 +357,72 @@ _SKILL_ALIASES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Defaults for questions nobody saved an answer for (the candidate's choice on 2026-10-21)
+
+DEFAULT_SOURCE = "default (2026-10-21 policy)"
+HOME_CITY = "Bengaluru"  # where the candidate lives and searches (with the profile ``location``)
+# Commitments the candidate decides: never answered Yes by default, whatever else the question says.
+_NOT_BY_DEFAULT = re.compile(
+    r"\b(?:bond|service agreement|deposit|fees?|pay|pay cut|salary|ctc|stipend|unpaid|shifts?|night|"
+    r"weekends? work|work(?:ing)? (?:on )?weekends?|6 days|six days|abroad|overseas|travel\w*)\b"
+)
+_INTERVIEW = re.compile(r"\binterview\w*|\bf2f\b|\bface to face\b|\bwalk ?in\b")
+_WILLING = re.compile(
+    r"\b(?:available|availability|willing|comfortable|ok|okay|fine|able|attend|appear|ready|open|agree|"
+    r"can you|could you|will you|would you|are you|"
+    # "Only apply if you can go to the office for the interview" (Recro, 2026-10-21)
+    r"you can|if you can|can (?:go|come|visit|travel to the office)|go to|come to|visit)\b"
+)
+_PAST = re.compile(r"\b(?:have you|had you|did you|were you|previously|earlier|before|in the past|ever|already|last \d+)\b")
+_BACKGROUND = re.compile(r"\bbackground (?:check|verification|screening)\b|\bbgv\b|\breference checks?\b|\bdocument verification\b")
+_CONSENT = re.compile(r"\b(?:consent|agree|authori[sz]e|permission|allow|accept)\b")
+_CONSENT_TO = re.compile(
+    r"\b(?:recruiters?|profile|contact\w*|communicat\w*|share|sharing|data|information|details|privacy|terms|"
+    r"polic(?:y|ies)|e ?mails?|sms|whatsapp|calls?|messages?|updates|represent\w*|process\w*|stor\w*|resume|cv)\b"
+)
+_OFFICE = re.compile(r"\b(?:wfo|office|hybrid|on ?site)\b")
+_AGREE_OPTION = re.compile(r"^(?:yes|i agree|agree|i consent|i accept|accept|i confirm|confirm)\b")
+# A question a plain "Yes" answers in a text box (not "Which days ...", "Please specify ...").
+_YES_NO_QUESTION = re.compile(r"^(?:are|is|do|does|can|could|will|would|have|has|shall|should|may|i|kindly confirm|please confirm|confirm)\b")
+# A self-rating: "Rate yourself ...", or a scale with a word about your skill ("On a scale of 1-10, how
+# proficient are you in Java?"); not someone else's rating of you (an appraisal) or a pay rate.
+_SELF_RATING = re.compile(r"\brate (?:yourself|your|you)\b|\bhow (?:would|do|will) you rate\b|\bself ?rat\w*")
+_ON_A_SCALE = re.compile(r"\bon a scale\b|\bscale of\b|\bout of (?:5|10|five|ten)\b")
+_PROFICIENCY = re.compile(
+    r"\b(?:proficien\w*|expert\w*|skill\w*|knowledge|comfortable|good|strong|experienced|hands on|level|familiar\w*|confiden\w*)\b"
+)
+_NOT_RATING = re.compile(
+    r"\b(?:hourly|daily|monthly|billing|pay|interest|success|conversion|attrition|exchange) rates?\b|\brate card\b"
+    r"|\b(?:appraisal|performance|feedback|review|glassdoor|customer|cgpa|gpa|grade|percentage|manager)\b"
+)
+_NOW = re.compile(r"\b(?:currently|presently|current|right now)\b")  # what you do now, not what you'd accept
+_SCALE = re.compile(r"(?:out of|scale of|/)\s*(10|5|ten|five)\b|\b[01]\s*(?:-|–|to)\s*(10|5)\b")
+_SCALE_WORDS = {"10": 10, "ten": 10, "5": 5, "five": 5}
+# Self-rating out of 5 / out of 10: (one of your skills, anything else).
+RATINGS = {5: (4, 2), 10: (8, 4)}
+
+
+def rating_scale(field: FormField) -> int | None:
+    """5 or 10: what the label says ("out of 10", "1-5", "/10"), else what numeric options go up to."""
+    match = _SCALE.search(field.label.lower())
+    if match:
+        return _SCALE_WORDS[match.group(1) or match.group(2)]
+    if field.type in CHOICE_TYPES:
+        tops = [n[0] for n in (_numbers(o) for o in _real_options(field.options)) if n]
+        if len(tops) >= 2 and max(tops) in (5.0, 10.0):
+            return int(max(tops))
+    return None
+
+
+def closest_number_option(options: tuple[str, ...], value: float) -> str | None:
+    """The option whose (first) number is closest to ``value``; the lower one on a tie."""
+    numbered = [(o, n[0]) for o in _real_options(options) if (n := _numbers(o))]
+    if len(numbered) < 2:
+        return None
+    return min(numbered, key=lambda item: (abs(item[1] - value), item[1]))[0]
+
+
 def save_learned(session: Session, learned: list[tuple[str, str]]) -> int:
     """Add answers worked out from the profile to the Template Library (kind ``answer``), once per
     question. Returns how many were added. The caller commits and refreshes the mirror."""
@@ -413,12 +493,21 @@ class AnswerBook:
         template_exists = from_template.reason.startswith("no answer: the template answer")
         inferred = None if template_exists else self._infer(field)
         if inferred is not None and inferred.value is not None:
-            self.learned.append((field.label, inferred.value))
-            self.templates.append((field.label, inferred.value))
+            self._remember(field.label, inferred.value)
             return inferred
         if special is not None:
             return special
+        default = None if template_exists else self._default(field)
+        if default is not None and default.value is not None:
+            # A single checkbox is ticked with "true"; the template says "Yes" (it fits any field).
+            self._remember(field.label, "Yes" if default.value == "true" else default.value)
+            return default
         return from_template
+
+    def _remember(self, question: str, value: str) -> None:
+        """Keep an answer worked out here: reused for the same question, saved as a template later."""
+        self.learned.append((question, value))
+        self.templates.append((question, value))
 
     # -- answers worked out from the profile (the candidate asked for this on 2026-10-14) --------
 
@@ -432,6 +521,12 @@ class AnswerBook:
                 if re.search(rf"(?<![a-z0-9+#]){re.escape(norm(variant))}(?![a-z0-9+#])", haystack):
                     return True
         return False
+
+    def _other_city(self, text: str) -> bool:
+        """Whether ``text`` names an Indian city other than the candidate's (profile ``location``,
+        Bengaluru)."""
+        home = tuple(part.strip() for part in self.profile.get("location", "").split(",") if part.strip())
+        return mentions_other_city((*home, HOME_CITY), text)
 
     def _yes_no(self, field: FormField, yes: bool, source: str) -> Answer | None:
         word = "Yes" if yes else "No"
@@ -470,7 +565,7 @@ class AnswerBook:
             return self._yes_no(field, not foreign, "profile: based in India")
         if re.search(r"\b(?:commut|relocat|on ?site|onsite|hybrid|in ?office|work(?:ing)? from (?:the )?office|reside|based in|located in|live in)", label):
             city = norm(self.profile.get("location", "bengaluru"))
-            other_city = re.search(r"\b(?:mumbai|pune|hyderabad|chennai|delhi|noida|gurgaon|gurugram|kolkata|ahmedabad)\b", label)
+            other_city = self._other_city(field.label)
             here = city in label or "bangalore" in label or "bengaluru" in label or not other_city
             return self._yes_no(field, bool(here), "profile location and job-search locations")
         if re.search(r"\bbackground (?:check|verification)\b|\bdrug test\b", label):
@@ -501,6 +596,60 @@ class AnswerBook:
             for question, answer in self.templates:
                 if norm(question).startswith("why are you a good fit") and "short" in norm(question):
                     return Answer(answer, f'template "{question}"')
+        return None
+
+    # -- defaults for questions nobody saved an answer for (2026-10-21) ----------------------------
+
+    def _default(self, field: FormField) -> Answer | None:
+        label = norm(field.label)
+        if not label or _NOT_BY_DEFAULT.search(label):
+            return None
+        rating = self._rating(field, label)
+        if rating is not None:
+            return rating
+        if self._other_city(field.label):
+            return None  # another city: relocating to Pune stays No (``_infer``), the rest isn't guessed
+        willing = _WILLING.search(label) is not None
+        if (
+            (_INTERVIEW.search(label) and willing and not _PAST.search(label))
+            or _BACKGROUND.search(label)
+            or (_CONSENT.search(label) and _CONSENT_TO.search(label))
+            or (_OFFICE.search(label) and willing and not _PAST.search(label) and not _NOW.search(label))
+        ):
+            return self._default_yes(field, label)
+        return None
+
+    def _default_yes(self, field: FormField, label: str) -> Answer | None:
+        if field.type in CHOICE_TYPES:
+            option = choose_option(field.options, "Yes")
+            if option is None:
+                agree = [o for o in _real_options(field.options) if _AGREE_OPTION.match(norm(o))]
+                option = agree[0] if len(agree) == 1 else None
+            return Answer(option, DEFAULT_SOURCE) if option else None
+        if field.type == "checkbox":
+            if not field.options:
+                return Answer("true", DEFAULT_SOURCE)
+            options = _real_options(field.options)
+            if len(options) == 1 and _AGREE_OPTION.match(norm(options[0])):
+                return Answer(options[0], DEFAULT_SOURCE)
+            return None
+        if field.type == "text" and _YES_NO_QUESTION.match(label):
+            return Answer("Yes", DEFAULT_SOURCE)
+        return None
+
+    def _rating(self, field: FormField, label: str) -> Answer | None:
+        """"Rate yourself out of 10 in Java": 8 for one of your skills, 4 otherwise (out of 5: 4 / 2)."""
+        if _NOT_RATING.search(label) or not (_SELF_RATING.search(label) or (_ON_A_SCALE.search(label) and _PROFICIENCY.search(label))):
+            return None
+        scale = rating_scale(field)
+        if scale is None:
+            return None
+        value = RATINGS[scale][0 if self._has_skill(field.label) else 1]
+        if field.type in CHOICE_TYPES:
+            option = closest_number_option(field.options, value)
+            return Answer(option, DEFAULT_SOURCE) if option else None
+        if field.type in ("numeric", "text"):
+            return Answer(str(value), DEFAULT_SOURCE)
         return None
 
     def _special(self, field: FormField) -> Answer | None:

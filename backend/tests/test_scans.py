@@ -333,7 +333,13 @@ def test_manual_run_moves_only_its_group(seeded_settings, fake_browser):
 # The real scanners, end to end with the fake browser
 
 
-def test_full_run_with_real_scanners(seeded_settings, fake_browser):
+def test_full_run_with_real_scanners(seeded_settings, fake_browser, monkeypatch):
+    from app.sources.naukri import selectors as naukri_selectors
+
+    # The fake Naukri answers one search per role; the URL filters (one search per experience level) are
+    # tested in test_naukri.py.
+    monkeypatch.setattr(naukri_selectors, "EXPERIENCE_PARAM", None)
+    monkeypatch.setattr(naukri_selectors, "FRESHNESS_PARAM", None)
     now = utcnow()
     naukri = nk_json(
         nk_job("n1", "Backend Developer", posted=now - timedelta(minutes=30)),
@@ -353,7 +359,7 @@ def test_full_run_with_real_scanners(seeded_settings, fake_browser):
         ]
         assert latest["naukri_jobs"]["status"] == "ok"
         assert (latest["naukri_jobs"]["found"], latest["naukri_jobs"]["new"]) == (1, 1)
-        assert latest["naukri_jobs"]["message"].startswith("Naukri isn't connected")
+        assert latest["naukri_jobs"]["message"].startswith("Search: 2 jobs read; 1 matched. Naukri isn't connected")
         # The LinkedIn search needs the login since 2026-10-13.
         assert latest["linkedin_jobs"]["status"] == "skipped"
         assert latest["linkedin_jobs"]["message"].startswith("LinkedIn isn't connected, so jobs weren't searched")
@@ -441,7 +447,8 @@ def test_posts_scan_with_login_marks_disconnected_on_login_wall(seeded_settings,
         assert app.state.scans.wait(10)
         latest = {r["kind"]: r for r in client.get("/api/scans/status").json()["latest"]}
         assert latest["linkedin_posts"]["status"] == "failed"
-        assert latest["linkedin_posts"]["message"] == "LinkedIn redirected to its login page; stopped."
+        # (The feed, an empty page here, adds its own note.)
+        assert latest["linkedin_posts"]["message"].startswith("LinkedIn redirected to its login page; stopped.")
         linkedin = client.get("/api/connections").json()["items"][0]
         assert linkedin["status"] == "disconnected" and "expired" in linkedin["message"]
         assert latest["linkedin_jobs"]["status"] == "ok"  # the search itself worked (no jobs today)

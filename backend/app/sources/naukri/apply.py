@@ -269,7 +269,8 @@ class NaukriApplier:
                     attempt = apply_on_page(
                         browser, stored.url, kind=self.kind.value, rules=rules, stored=stored, answers=answers
                     )
-                    clicked = attempt.result != ApplyResult.skipped
+                    # Pause after anything that touched Naukri, also a skip from the recruiter questions.
+                    clicked = attempt.result != ApplyResult.skipped or attempt.clicked
                     logger.info("Naukri apply %s at %s: %s %s", title, stored.company, attempt.result, attempt.detail)
                     results.append((job_id, attempt))
                     if attempt.result == ApplyResult.quota_reached:
@@ -287,13 +288,15 @@ class NaukriApplier:
             return results, failure
 
         results, failure = ctx.browsers.worker(self.platform.value).submit(task).result()
-        counts: dict[ApplyResult, int] = {}
+        counts: dict[ApplyResult | str, int] = {}
         with Session(ctx.engine) as session:
             for job_id, attempt in results:
                 job = session.get(Job, job_id)
                 if job is not None:
                     record_attempt(session, job, attempt)
-                counts[attempt.result] = counts.get(attempt.result, 0) + 1
+                # A skip after Apply was clicked came from a recruiter question nobody answered.
+                key = "no_answer" if attempt.result == ApplyResult.skipped and attempt.clicked else attempt.result
+                counts[key] = counts.get(key, 0) + 1
             learned = save_learned(session, answers.learned)
             session.commit()
             if learned:
@@ -304,6 +307,7 @@ class NaukriApplier:
         labels = {
             ApplyResult.already_applied: "already applied",
             ApplyResult.skipped: "skipped by your rules",
+            "no_answer": "skipped for a recruiter question without a saved answer",
             ApplyResult.questionnaire: "need your answers (recruiter questions)",
             ApplyResult.company_site: "turned out to be company-site jobs",
             ApplyResult.no_button: "had no Apply button",

@@ -6,13 +6,15 @@ import { EmptyState, QueryBoundary } from '../components/DataState'
 import { JobsTable } from '../components/JobsTable'
 import { PageHeader, RefreshButton } from '../components/PageHeader'
 import { Pager } from '../components/Pager'
+import { RemovedToast } from '../components/RemovedToast'
 import { ScannerPanel } from '../components/ScannerPanel'
 import { useCounts } from '../hooks/useCounts'
+import { useJobRemoval } from '../hooks/useJobRemoval'
 import { PAGE_SIZE, useStepBackWhenEmpty } from '../hooks/usePaging'
 import { useQuery } from '../hooks/useQuery'
 import { useScanStatus } from '../hooks/useScanStatus'
 import { APPLY_TYPE_LABEL, PLATFORM_LABEL } from '../lib/format'
-import { APPLY_TYPES_BY_PLATFORM } from '../lib/jobs'
+import { APPLY_TYPES_BY_PLATFORM, LISTED_STATUSES } from '../lib/jobs'
 
 /** Every apply type once, LinkedIn's first. */
 const ALL_TYPES = [...new Set(PLATFORMS.flatMap((p) => APPLY_TYPES_BY_PLATFORM[p]))]
@@ -23,14 +25,25 @@ export function DashboardPage() {
   const [applyType, setApplyType] = useState<ApplyType | ''>('')
   const [offset, setOffset] = useState(0)
 
-  // Every job from both platforms, newest found first.
+  // Every listed job from both platforms, newest found first.
   const jobs = useQuery(`all-jobs:${platform}:${applyType}:${offset}`, (signal) =>
     api.jobs(
-      { platform: platform || undefined, apply_type: applyType || undefined, sort: 'found', limit: PAGE_SIZE, offset },
+      {
+        platform: platform || undefined,
+        apply_type: applyType || undefined,
+        status: LISTED_STATUSES,
+        sort: 'found',
+        limit: PAGE_SIZE,
+        offset,
+      },
       signal,
     ),
   )
   useStepBackWhenEmpty(jobs.data?.items.length, offset, setOffset)
+  const removal = useJobRemoval(jobs.data?.items, () => {
+    jobs.reload()
+    refresh()
+  })
 
   // When a scanner finishes there may be new jobs.
   const scan = useScanStatus(() => {
@@ -67,7 +80,7 @@ export function DashboardPage() {
       <CollapsibleSection
         id="dashboard.jobs"
         title="All jobs"
-        meta={jobs.data ? <span className="num">{jobs.data.total.toLocaleString()}</span> : undefined}
+        meta={jobs.data ? <span className="num">{removal.view(jobs.data).total.toLocaleString()}</span> : undefined}
       >
         <div className="filter-bar">
           <div className="segmented" role="group" aria-label="Platform">
@@ -89,20 +102,25 @@ export function DashboardPage() {
         <QueryBoundary
           query={jobs}
           loadingLabel="Loading jobs…"
-          isEmpty={(d) => d.items.length === 0}
+          isEmpty={(d) => removal.view(d).items.length === 0}
           empty={<EmptyState title={platform || applyType ? 'No matching jobs.' : 'No jobs yet.'} />}
         >
-          {(d) => (
-            <>
-              <JobsTable
-                jobs={d.items}
-                columns={['job', 'platform', 'type', 'location', 'posted', 'found', 'status']}
-              />
-              <Pager total={d.total} offset={offset} limit={PAGE_SIZE} shown={d.items.length} onChange={setOffset} />
-            </>
-          )}
+          {(d) => {
+            const v = removal.view(d)
+            return (
+              <>
+                <JobsTable
+                  jobs={v.items}
+                  columns={['job', 'platform', 'type', 'location', 'posted', 'found', 'status']}
+                  removal={removal}
+                />
+                <Pager total={v.total} offset={offset} limit={PAGE_SIZE} shown={v.items.length} onChange={setOffset} />
+              </>
+            )
+          }}
         </QueryBoundary>
       </CollapsibleSection>
+      <RemovedToast removal={removal} />
     </main>
   )
 }

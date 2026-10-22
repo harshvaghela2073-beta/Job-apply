@@ -27,7 +27,10 @@ def _job_counts(session: Session, day_start, day_end) -> tuple[Counts, Counts]:
             func.sum(case((is_applied, 1), else_=0)),
             func.sum(case((found_today, 1), else_=0)),
             func.sum(case((and_(found_today, is_applied), 1), else_=0)),
-        ).group_by(Job.platform, Job.apply_type)
+        )
+        # Removed by the candidate or skipped by the rules: not "found" (2026-10-21).
+        .where(col(Job.status).not_in([JobStatus.skipped, JobStatus.failed]))
+        .group_by(Job.platform, Job.apply_type)
     ).all()
     today: Counts = {}
     all_time: Counts = {}

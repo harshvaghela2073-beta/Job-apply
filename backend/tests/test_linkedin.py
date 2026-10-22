@@ -246,7 +246,9 @@ def test_posts_scan_counts_senior_and_skip_listed_posts(client, fake_browser):
     fake_browser.routes = [("search/results/content", page("https://www.linkedin.com/search/results/content/?keywords=x", html))]
     report = LinkedInPostsScanner().scan(FakeSession(fake_browser, None, True), make_ctx(client.app, NOW, prefs=FIT_PREFS))
     assert [c.external_id for c in report.candidates] == ["urn:li:activity:7381000000000000033"]
-    (note,) = report.notes
+    feed, note = report.notes  # the feed (an empty page here) gets its own note
+    assert feed.startswith("The home feed showed no readable posts.")
+    assert note.startswith("Read 0 feed posts and 3 search posts;")
     assert "1 a senior role" in note and "1 on your skip list" in note
 
 
@@ -258,8 +260,8 @@ def test_posts_scan(client, fake_browser):
     session = FakeSession(fake_browser, None, True)
     report = LinkedInPostsScanner().scan(session, make_ctx(client.app, NOW))
     assert report.failure is None and report.login_ok
-    # More scrolls for the Google Form searches than for the role searches.
-    assert session.scrolls == POST_FORM_SCROLLS * len(FORM_QUERIES) + POST_SCROLLS * len(PREFS.roles)
+    # More scrolls for the Google Form searches than for the role searches; one for the (empty) feed.
+    assert session.scrolls == 1 + POST_FORM_SCROLLS * len(FORM_QUERIES) + POST_SCROLLS * len(PREFS.roles)
     # The lnkd.in link is followed with a plain request, not a page load.
     assert "LINK https://lnkd.in/gXyZ12" in fake_browser.visited
     assert not any(url.startswith("https://lnkd.in") for url in fake_browser.visited)

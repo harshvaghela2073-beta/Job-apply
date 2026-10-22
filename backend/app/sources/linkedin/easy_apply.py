@@ -13,8 +13,9 @@ On ``https://www.linkedin.com/jobs/view/<id>/``:
    page's own script with a time limit; Playwright's locator waits (visible, stable) time out there.
 3. After Next / Review, LinkedIn's inline errors are read. A numeric experience field that wants a
    whole number gets 2 instead of 1.9 (once); any other rejected value makes the field unanswerable.
-4. If a required field has no answer, the form is closed (Dismiss -> Discard), the job becomes
-   ``needs_manual`` and the questions go to the unanswered questions. **Nothing is submitted with a
+4. If a required field has no answer (the candidate's defaults of 2026-10-21 included), the form is
+   closed (Dismiss -> Discard) and the job is ``skipped`` ("The form asks <question>, which has no
+   saved answer."); the questions go to the unanswered questions. **Nothing is submitted with a
    guessed value.**
 5. Before Submit, "Follow <company>" is unticked. Success = "Application sent" / "Your application
    was sent". The resume LinkedIn preselects is used; nothing is uploaded.
@@ -27,6 +28,14 @@ lists every field with the value chosen (or null) and why.
 ``EASY_APPLY_DAILY_CAP`` per day, a random 45-90 s pause after each application that clicked Easy
 Apply, and it stops at a login wall, a security check, a block or LinkedIn's daily limit.
 
+Then (2026-10-21, every run, after Easy Apply) the company links: up to ``COMPANY_LINKS_PER_RUN``
+company-site jobs still ``found`` without an ``apply_url`` (found in the past
+``COMPANY_LINK_MAX_AGE``, newest first) have their job page read, with the usual pauses between page
+loads. The "Apply on company website" target becomes the job's ``apply_url``; a page that shows Easy
+Apply makes the job ``easy_apply`` (applied to on a later run), "Applied ..." marks it applied, and
+"No longer accepting applications" skips it. A page with none of these isn't opened again
+(``NO_COMPANY_LINK``).
+
 Selectors and texts live in ``selectors.py``; they need a live check.
 """
 
@@ -38,15 +47,16 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
-from sqlmodel import Session
+from sqlalchemy import or_
+from sqlmodel import Session, col, select
 
 from app.browser import BrowserSession, BrowserUnavailable
 from app.browser.driver import PageResult
-from app.models import ApplyType, Job, Platform, ScanKind, ScanStatus
+from app.models import ApplyType, Job, JobStatus, Platform, ScanKind, ScanStatus
 from app.scanner import applying
-from app.scanner.applying import ApplyAttempt, ApplyResult, StoredJob, record_attempt
+from app.scanner.applying import ApplyAttempt, ApplyResult, StoredJob, no_saved_answer, record_attempt
 from app.services.mirror import refresh_mirror
-from app.scanner.base import LoginWall, ScanBlocked, ScanContext, ScanOutcome, capture_failure
+from app.scanner.base import LoginWall, Pacer, ScanBlocked, ScanContext, ScanOutcome, capture_failure
 from app.services.app_settings import AUTO_APPLY_LINKEDIN, get_flag
 from app.sources.html import first, soup, text_of, visible_text
 from app.sources.linkedin import selectors as S
@@ -72,6 +82,11 @@ MAX_SILENT_READS = 3  # form reads in a row the page didn't answer before giving
 CONFIRM_TIMEOUT_SECONDS = 15
 MAX_FAILED_IN_A_ROW = 2
 OLD_JOB = timedelta(hours=36)  # older than this per its job page: not one of today's jobs
+# Company-site jobs whose job page is read for the company's apply link, per run (2026-10-21).
+COMPANY_LINKS_PER_RUN = 10
+COMPANY_LINK_MAX_AGE = timedelta(days=2)
+NO_COMPANY_LINK = "No company apply link on the LinkedIn job page."
+CLOSED = "LinkedIn says it's no longer accepting applications."
 
 LOGIN_EXPIRED = "The saved LinkedIn login has expired. Connect again."
 SECURITY_CHECK = "LinkedIn asked for a security check. Connect again and complete it in the window."
@@ -495,16 +510,10 @@ def walk_form(browser: BrowserSession, answers: AnswerBook, *, dry_run: bool, ki
                 if f.required:
                     problems.append(_question(f))
         if unanswered:
+            # Skipped, not left waiting (2026-10-21); the draft is discarded and nothing is sent.
             questions = _unique([_question(f) for f in unanswered])
             note = discard(browser)
-            return ApplyAttempt(
-                ApplyResult.questionnaire,
-                f"LinkedIn's form asks {len(questions)} required question(s) with no answer in your profile or "
-                "Template Library; the draft was discarded and nothing was sent." + note,
-                questions,
-                facts,
-                clicked=True,
-            )
+            return ApplyAttempt(ApplyResult.skipped, no_saved_answer(questions) + note, questions, facts, clicked=True)
         if problems:
             return _fail(browser, kind, "Couldn't fill in: " + "; ".join(problems) + ".", facts)
 
@@ -605,7 +614,7 @@ def apply_easy(
                 ApplyResult.company_site, "This job is applied to on the company's site (no Easy Apply).", facts=facts
             )
         if state.closed:
-            return ApplyAttempt(ApplyResult.skipped, "LinkedIn says it's no longer accepting applications.", facts=facts)
+            return ApplyAttempt(ApplyResult.skipped, CLOSED, facts=facts)
         note = capture_failure(browser, kind)
         return ApplyAttempt(ApplyResult.no_button, "No Easy Apply button on the job page." + note, facts=facts)
     reason = skip_reason(rules, job_facts, stored) if rules is not None else None
@@ -633,6 +642,82 @@ def remember_hiring_team(job: Job, team: list[dict] | None) -> None:
     if person is not None:
         job.contact_name, job.contact_profile_url = person.name, person.profile_url
         job.contact_checked_at = utcnow()
+
+
+# ---------------------------------------------------------------------------
+# Company links (2026-10-21)
+
+
+def company_link_jobs(session: Session, now, limit: int = COMPANY_LINKS_PER_RUN) -> list[Job]:
+    """Company-site jobs still ``found`` without the company's apply link, newest first; jobs whose
+    page showed none before (``NO_COMPANY_LINK``) aren't opened again."""
+    since = to_utc(now or utcnow()) - COMPANY_LINK_MAX_AGE
+    return list(
+        session.exec(
+            select(Job)
+            .where(
+                Job.platform == Platform.linkedin,
+                Job.apply_type == ApplyType.company_site,
+                Job.status == JobStatus.found,
+                col(Job.apply_url).is_(None),
+                col(Job.found_at) >= since,
+                or_(col(Job.status_reason).is_(None), col(Job.status_reason) != NO_COMPANY_LINK),
+            )
+            .order_by(col(Job.found_at).desc(), col(Job.id).desc())
+            .limit(limit)
+        ).all()
+    )
+
+
+def read_company_link(browser: BrowserSession, url: str) -> tuple[JobPageState, list[dict]]:
+    """The job page's apply state (its company link in ``external_url``) and hiring team. Raises
+    ``LoginWall`` / ``ScanBlocked`` like the Easy Apply page."""
+    result = browser.goto(url, wait_for=S.JOB_PAGE_READY, timeout=40)
+    check_job_page(result)
+    html = browser.html()
+    state = read_job_page(html)
+    if not (state.applied or state.easy_apply or state.external_url or state.closed):
+        browser.wait(3.0)  # the top card renders late on slow loads
+        html = browser.html()
+        state = read_job_page(html)
+    return state, [person.as_dict() for person in parse_hiring_team(html)]
+
+
+def store_company_link(session: Session, job: Job, state: JobPageState, team: list[dict]) -> str:
+    """Update the job from its page; returns what was found: link / easy_apply / applied / closed /
+    none. The caller commits."""
+    remember_hiring_team(job, team)
+    if state.external_url:
+        job.apply_url = state.external_url
+    if state.applied:
+        record_attempt(session, job, ApplyAttempt(ApplyResult.already_applied, "LinkedIn shows this job as already applied."))
+        return "applied"
+    job.updated_at = utcnow()
+    session.add(job)
+    if state.easy_apply:
+        job.apply_type = ApplyType.easy_apply  # applied to on a later run
+        job.status_reason = None
+        return "easy_apply"
+    if state.external_url:
+        return "link"
+    if state.closed:
+        job.status, job.status_reason = JobStatus.skipped, CLOSED
+        return "closed"
+    job.status_reason = NO_COMPANY_LINK
+    return "none"
+
+
+def company_links_note(found: dict[str, int]) -> str:
+    """"Found company links for 3 jobs." and what else the pages showed."""
+    note = f"Found company links for {found.get('link', 0)} jobs."
+    extra = [
+        f"{found[key]} {label}" for key, label in (
+            ("easy_apply", "turned out to be Easy Apply"),
+            ("applied", "already applied"),
+            ("closed", "no longer accepting applications"),
+        ) if found.get(key)
+    ]
+    return note + (" " + ", ".join(extra) + "." if extra else "")
 
 
 # ---------------------------------------------------------------------------
@@ -665,25 +750,32 @@ class LinkedInApplier:
 
     def run(self, ctx: ScanContext) -> ScanOutcome:
         self.pauses = []
+        jobs: list[Job] = []
+        not_applying = None  # why Easy Apply doesn't run this time
         with Session(ctx.engine) as session:
             if not get_flag(session, AUTO_APPLY_LINKEDIN):
-                return ScanOutcome(status=ScanStatus.skipped, message="LinkedIn auto-apply is off.")
-            cap = ctx.settings.easy_apply_daily_cap
-            remaining = cap - applying.applied_today(session, ctx.now, Platform.linkedin, ApplyType.easy_apply)
-            if remaining <= 0:
-                return ScanOutcome(
-                    status=ScanStatus.skipped, message=f"Today's Easy Apply limit of {cap} applications is reached."
-                )
-            jobs = applying.pending_jobs(
-                session, ctx.now, min(remaining, APPLY_MAX_PER_RUN), Platform.linkedin, ApplyType.easy_apply
-            )
+                not_applying = "LinkedIn auto-apply is off."
+            else:
+                cap = ctx.settings.easy_apply_daily_cap
+                remaining = cap - applying.applied_today(session, ctx.now, Platform.linkedin, ApplyType.easy_apply)
+                if remaining <= 0:
+                    not_applying = f"Today's Easy Apply limit of {cap} applications is reached."
+                else:
+                    jobs = applying.pending_jobs(
+                        session, ctx.now, min(remaining, APPLY_MAX_PER_RUN), Platform.linkedin, ApplyType.easy_apply
+                    )
+            link_targets = [(job.id, job.url) for job in company_link_jobs(session, ctx.now)]
             rules = load_rules(session)
             answers = AnswerBook.load(session)
-        if not jobs:
+        if not jobs and not link_targets:
+            if not_applying:
+                return ScanOutcome(status=ScanStatus.skipped, message=not_applying)
             return ScanOutcome(status=ScanStatus.ok, message="No new Easy Apply jobs to apply to.")
         ctx.connections.sync_from_chrome(self.platform)
         if not ctx.connections.login_usable(self.platform):
-            return ScanOutcome(status=ScanStatus.skipped, message="LinkedIn isn't connected, so nothing was applied.")
+            return ScanOutcome(
+                status=ScanStatus.skipped, message=not_applying or "LinkedIn isn't connected, so nothing was applied."
+            )
 
         profile_dir = ctx.browsers.profile_dir(self.platform)
         targets = [
@@ -694,6 +786,7 @@ class LinkedInApplier:
         def task(driver):
             browser = driver.open(profile_dir=profile_dir, headless=ctx.settings.scan_headless)
             results: list[tuple[int, ApplyAttempt]] = []
+            links: list[tuple[int, JobPageState, list[dict]]] = []
             failure = login_lost = None
             try:
                 if not LINKEDIN_LOGIN.has_auth_cookie(browser.cookies()):
@@ -719,6 +812,8 @@ class LinkedInApplier:
                             "check the screenshots in data/diagnostics."
                         )
                         break
+                if failure is None:
+                    self._read_company_links(browser, ctx, link_targets, links, after_pages=bool(results))
             except LoginWall as error:
                 failure = str(error)
                 login_lost = SECURITY_CHECK if "security check" in failure.lower() else LOGIN_EXPIRED
@@ -731,38 +826,68 @@ class LinkedInApplier:
                 failure += capture_failure(browser, self.kind.value)
             finally:
                 browser.close()
-            return results, failure, login_lost
+            return results, links, failure, login_lost
 
-        results, failure, login_lost = ctx.browsers.worker(self.platform.value).submit(task).result()
+        results, links, failure, login_lost = ctx.browsers.worker(self.platform.value).submit(task).result()
         if login_lost:
             ctx.connections.record_login_lost(self.platform, login_lost)
-        counts: dict[ApplyResult, int] = {}
+        counts: dict[ApplyResult | str, int] = {}
+        found: dict[str, int] = {}
         with Session(ctx.engine) as session:
             for job_id, attempt in results:
                 job = session.get(Job, job_id)
                 if job is not None:
                     record_attempt(session, job, attempt)
                     remember_hiring_team(job, attempt.facts.get("hiring_team"))
-                counts[attempt.result] = counts.get(attempt.result, 0) + 1
+                # A question without a saved answer is counted apart from the skip rules.
+                key = "no_answer" if attempt.result == ApplyResult.skipped and attempt.questions else attempt.result
+                counts[key] = counts.get(key, 0) + 1
+            for job_id, state, team in links:
+                job = session.get(Job, job_id)
+                if job is not None and job.status == JobStatus.found and job.apply_type == ApplyType.company_site:
+                    what = store_company_link(session, job, state, team)
+                    found[what] = found.get(what, 0) + 1
             learned = save_learned(session, answers.learned)
             session.commit()
             if learned:
                 refresh_mirror(session, ctx.settings)
 
         applied = counts.get(ApplyResult.applied, 0)
-        parts = [f"Applied to {applied}"]
-        labels = {
-            ApplyResult.already_applied: "already applied",
-            ApplyResult.skipped: "skipped by your rules",
-            ApplyResult.questionnaire: "need your answers (questions without a template)",
-            ApplyResult.company_site: "turned out to be company-site jobs",
-            ApplyResult.no_button: "had no Easy Apply button",
-            ApplyResult.no_confirmation: "couldn't be completed",
-            ApplyResult.quota_reached: "hit LinkedIn's daily Easy Apply limit",
-        }
-        parts += [f"{counts[r]} {label}" for r, label in labels.items() if counts.get(r)]
-        message = ", ".join(parts) + "."
+        if targets:
+            parts = [f"Applied to {applied}"]
+            labels = {
+                ApplyResult.already_applied: "already applied",
+                ApplyResult.skipped: "skipped by your rules",
+                "no_answer": "skipped for a question without a saved answer",
+                ApplyResult.questionnaire: "need your answers (questions without a template)",
+                ApplyResult.company_site: "turned out to be company-site jobs",
+                ApplyResult.no_button: "had no Easy Apply button",
+                ApplyResult.no_confirmation: "couldn't be completed",
+                ApplyResult.quota_reached: "hit LinkedIn's daily Easy Apply limit",
+            }
+            parts += [f"{counts[r]} {label}" for r, label in labels.items() if counts.get(r)]
+            message = ", ".join(parts) + "."
+        else:
+            message = not_applying or "No new Easy Apply jobs to apply to."
+        if links:
+            message += " " + company_links_note(found)
         if failure:
             message += f" Stopped: {failure}"
-        status = ScanStatus.failed if failure and not results else ScanStatus.ok
+        status = ScanStatus.failed if failure and not results and not links else ScanStatus.ok
         return ScanOutcome(status=status, found=len(results), new=applied, message=message)
+
+    def _read_company_links(
+        self, browser: BrowserSession, ctx: ScanContext, targets: list[tuple[int, str]],
+        links: list[tuple[int, JobPageState, list[dict]]], *, after_pages: bool,
+    ) -> None:
+        """Read each company-site job's page into ``links``, with the usual pauses between page loads
+        (one before the first when Easy Apply just loaded pages). Stops at the page budget or a stop."""
+        pacer = Pacer(min(COMPANY_LINKS_PER_RUN, ctx.settings.scan_max_page_loads), ctx.wait_range, ctx.stop)
+        if targets and after_pages and ctx.stop.wait(random.uniform(*ctx.wait_range)):
+            return
+        for job_id, url in targets:
+            if not pacer.next_load():
+                break
+            state, team = read_company_link(browser, url)
+            logger.info("LinkedIn company link for %s: %s", url, state.external_url or "none")
+            links.append((job_id, state, team))

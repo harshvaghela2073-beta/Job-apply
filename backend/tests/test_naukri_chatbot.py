@@ -434,14 +434,15 @@ def test_answers_every_kind_of_question_then_applies():
     assert answers.learned == [(RELOCATE, "Yes"), (JAVA_YEARS, "1.9")]
 
 
-def test_a_question_without_an_answer_stops_and_is_left_for_you():
+def test_a_question_without_an_answer_stops_and_skips_the_job():
+    """2026-10-21: skipped instead of left waiting for the candidate."""
     job = FakeNaukriJob("2002", [Q(RELOCATE, "radio", ("Yes", "No")), Q(DOB), Q(CTC)])
     attempt = run(job, book())
 
-    assert attempt.result == ApplyResult.questionnaire
+    assert attempt.result == ApplyResult.skipped and attempt.clicked
     assert attempt.questions == [DOB]
     assert job.sent == ["Yes"] and not job.applied  # never guessed, never completed
-    assert "Answered 1 of Naukri's recruiter questions" in attempt.detail
+    assert attempt.detail == f'The form asks "{DOB}", which has no saved answer.'
     assert [r["answer"] for r in attempt.facts["questions"]] == ["Yes", None]
 
 
@@ -450,7 +451,8 @@ def test_unanswered_question_is_recorded_on_the_job(session):
     attempt = run(FakeNaukriJob("2003", [Q(DOB)]), book())
     record_attempt(session, job_row, attempt)
     session.commit()
-    assert job_row.status == JobStatus.needs_manual and job_row.status_reason.endswith(f"Questions: {DOB}")
+    assert job_row.status == JobStatus.skipped
+    assert job_row.status_reason == f'Not auto-applied: The form asks "{DOB}", which has no saved answer.'
     assert [q.question for q in session.exec(select(UnansweredQuestion)).all()] == [DOB]
 
 
@@ -560,7 +562,7 @@ def test_applier_answers_questions_and_saves_learned_answers_once(client, settin
     assert RELOCATE in profile_path.read_text()  # the profile mirror was refreshed
 
 
-def test_applier_leaves_unanswerable_jobs_for_you(client, settings, fake_browser):
+def test_applier_skips_unanswerable_jobs(client, settings, fake_browser):
     connect_naukri(client, settings)
     engine = client.app.state.engine
     add_profile(engine)
@@ -572,10 +574,10 @@ def test_applier_leaves_unanswerable_jobs_for_you(client, settings, fake_browser
 
     outcome = NaukriApplier().run(make_ctx(client.app))
 
-    assert outcome.message.startswith("Applied to 0, 1 need your answers (recruiter questions).")
+    assert outcome.message.startswith("Applied to 0, 1 skipped for a recruiter question without a saved answer")
     with Session(engine) as session:
         job = session.get(Job, job_id)
-        assert job.status == JobStatus.needs_manual and DOB in job.status_reason
+        assert job.status == JobStatus.skipped and DOB in job.status_reason
         assert [q.question for q in session.exec(select(UnansweredQuestion)).all()] == [DOB]
         # The answer worked out on the way is kept for next time.
         assert session.exec(select(Template).where(Template.question == RELOCATE)).one().answer == "Yes"

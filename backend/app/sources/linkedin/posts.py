@@ -1,9 +1,12 @@
 """``linkedin_posts``: LinkedIn hiring posts that have a Google Form link or an email address. Needs
 the saved login; skipped when LinkedIn isn't connected.
 
-- Searches, newest first (``post_queries``): 5 aimed at Google Forms (``FORM_QUERIES``, the past
+- First the home feed (``FEED_URL``, 2026-10-21: posts from the candidate's network), read in
+  ``FEED_SCROLLS`` more batches. A feed that shows no readable posts doesn't fail the run: a
+  diagnostic page is saved and the run message says so (its markup needs a live check).
+- Then searches, newest first (``post_queries``): 5 aimed at Google Forms (``FORM_QUERIES``, the past
   week, read further with more scrolls), then one ``hiring <role>`` search per role (the past 24
-  hours). Up to ``POST_MAX_PAGE_LOADS`` page loads per run.
+  hours). Up to ``POST_MAX_PAGE_LOADS`` page loads per run, the feed's included.
 - A post matches when it isn't a course or training advert, its company isn't on the skip list
   (``search_skip_companies``: the company in the author's headline, or the author), a line that isn't
   about an internship or a senior role (``app.scanner.fit``, 2026-10-15) names one of the roles, any
@@ -13,8 +16,8 @@ the saved login; skipped when LinkedIn isn't connected.
 - Google Form links are found in the text and link targets; ``lnkd.in`` short links of posts that
   match otherwise are followed with a plain request (``resolve_link``, up to ``MAX_SHORT_LINKS`` per
   run, posts that mention a form first) to see whether they lead to a Google Form.
-- The run message counts the posts read, those with a form or an email, and why matching ones were
-  left out (``LEFT_OUT``); each Google Form post's decision is logged.
+- The run message counts the feed and search posts read, those with a form or an email, and why
+  matching ones were left out (``LEFT_OUT``); each Google Form post's decision is logged.
 - A login wall or security check marks LinkedIn as disconnected and stops the run.
 - The post's author (name and profile link, when a person posted it) is stored on the job: they get
   a connection note from ``linkedin_outreach`` while that switch is on.
@@ -189,6 +192,50 @@ class LinkedInPostsScanner:
             return ScanOutcome(status=ScanStatus.skipped, message=f"{LOGIN_EXPIRED} Hiring posts weren't searched.")
         return finish_scan(ctx, self.platform, report)
 
+    @staticmethod
+    def _check(result, report: ScanReport) -> None:
+        """Stop at a security check or a login wall (and mark the login lost)."""
+        url = result.url.lower()
+        if any(marker in url for marker in S.SECURITY_CHECK_MARKERS):
+            report.login_lost = SECURITY_CHECK
+            raise LoginWall("LinkedIn showed a security check; stopped.")
+        if LINKEDIN_LOGIN.is_login_wall(result.url):
+            report.login_lost = LOGIN_EXPIRED
+            raise LoginWall("LinkedIn redirected to its login page; stopped.")
+        report.login_ok = True
+
+    def read_feed(self, browser: BrowserSession, pacer: Pacer, report: ScanReport) -> list[Post]:
+        """The home feed's posts: the first batch and ``FEED_SCROLLS`` more. A feed with no readable
+        post (one more scroll is tried) saves a diagnostic page and a note; it doesn't stop the scan.
+        A login wall, a security check or a block does."""
+        if not pacer.next_load():
+            return []
+        try:
+            result = browser.goto(S.FEED_URL, wait_for=S.FEED_WAIT, timeout=60)
+        except BrowserUnavailable:
+            raise
+        except Exception as error:  # noqa: BLE001 - the searches still run
+            logger.info("Opening the LinkedIn feed failed: %s", error)
+            report.notes.append(
+                f"The home feed couldn't be opened ({type(error).__name__})." + capture_failure(browser, self.kind.value)
+            )
+            return []
+        self._check(result, report)
+        if result.status in S.BLOCK_STATUSES:
+            raise ScanBlocked(f"LinkedIn returned HTTP {result.status} to the home feed; stopped.")
+        found = {post.urn: post for post in parse_posts(browser.html())}
+        for _ in range(S.FEED_SCROLLS):
+            if not pacer.next_load():
+                break
+            browser.scroll()
+            for post in parse_posts(browser.html()):
+                found.setdefault(post.urn, post)
+            if not found:
+                break  # nothing readable after a scroll either: the layout isn't known
+        if not found:
+            report.notes.append("The home feed showed no readable posts." + capture_failure(browser, self.kind.value))
+        return list(found.values())
+
     def scan(self, browser: BrowserSession, ctx: ScanContext) -> ScanReport:
         report = ScanReport()
         pacer = Pacer(S.POST_MAX_PAGE_LOADS, ctx.wait_range, ctx.stop)
@@ -196,18 +243,14 @@ class LinkedInPostsScanner:
         posts: dict[str, Post] = {}
         empty_shot_taken = False
         try:
+            for post in self.read_feed(browser, pacer, report):
+                posts.setdefault(post.urn, post)
+            feed_posts = len(posts)
             for query in post_queries(ctx.prefs.roles):
                 if not pacer.next_load():
                     break
                 result = browser.goto(search_url(query), wait_for=S.POST_WAIT, timeout=60)
-                url = result.url.lower()
-                if any(marker in url for marker in S.SECURITY_CHECK_MARKERS):
-                    report.login_lost = SECURITY_CHECK
-                    raise LoginWall("LinkedIn showed a security check; stopped.")
-                if LINKEDIN_LOGIN.is_login_wall(result.url):
-                    report.login_lost = LOGIN_EXPIRED
-                    raise LoginWall("LinkedIn redirected to its login page; stopped.")
-                report.login_ok = True
+                self._check(result, report)
                 # LinkedIn renders about three posts at a time: read before and after each scroll.
                 html = browser.html()
                 page_posts = parse_posts(html)
@@ -255,7 +298,7 @@ class LinkedInPostsScanner:
             forms = sum(1 for post in posts.values() if find_form_links(post.text, *post.links))
             emails = sum(1 for post in posts.values() if not find_form_links(post.text, *post.links) and _emails(post))
             note = (
-                f"Read {len(posts)} posts from today's searches; {forms} had a Google Form"
+                f"Read {feed_posts} feed posts and {len(posts) - feed_posts} search posts; {forms} had a Google Form"
                 + (f" ({behind_short_links} behind lnkd.in links)" if behind_short_links else "")
                 + f", {emails} an email; {len(report.candidates)} matched your roles, experience and locations."
             )

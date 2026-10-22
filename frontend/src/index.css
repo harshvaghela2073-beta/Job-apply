@@ -1567,6 +1567,109 @@ select:disabled {
   font-size: 12px;
   color: var(--critical);
 }
+/* Remove (×) at the very end of a row; it stays in view when the table scrolls sideways. */
+.jobs-table .col-remove {
+  position: sticky;
+  right: 0;
+  width: 1%;
+  padding-left: 0;
+  padding-right: 6px;
+  background: var(--surface);
+}
+.jobs-table th.col-remove {
+  z-index: 1;
+  background: var(--surface-2);
+}
+.jobs-table tbody tr:hover td.col-remove {
+  background: var(--surface-2);
+}
+.row-remove {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  vertical-align: middle;
+  transition:
+    background-color 0.12s,
+    color 0.12s;
+}
+.row-remove svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+.row-remove:hover {
+  background: var(--accent-weak);
+  color: var(--text);
+}
+.row-remove[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: default;
+}
+.row-remove[aria-disabled='true']:hover {
+  background: transparent;
+  color: var(--muted);
+}
+
+/* "Removed · Undo" after a job is removed. */
+.toast-region {
+  position: fixed;
+  left: 50%;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  z-index: 30;
+  max-width: calc(100vw - 32px);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 5px 5px 16px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  box-shadow: var(--shadow-pop);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: auto;
+  animation: toast-in 0.16s ease-out;
+}
+.toast-sep {
+  opacity: 0.5;
+}
+.toast-action {
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  font-weight: 700;
+  cursor: pointer;
+}
+.toast-action:hover {
+  background: color-mix(in srgb, currentColor 18%, transparent);
+}
+.toast-action:focus-visible {
+  box-shadow: 0 0 0 2px currentColor;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}
 .table .col-id {
   width: 44px;
   color: var(--muted);
@@ -2167,7 +2270,7 @@ code {
     padding-top: 6px;
   }
 
-  /* Job lists: title and the status toggle on top, the other values in a wrapped line below. */
+  /* Job lists: title, the status toggle and × on top, the other values in a wrapped line below. */
   .jobs-table tr {
     position: relative;
   }
@@ -2181,7 +2284,24 @@ code {
     width: auto;
     padding: 0;
   }
-  .jobs-table td:not(.col-job):not(.col-status) {
+  .jobs-table.has-remove td.col-job {
+    padding-right: 136px;
+  }
+  .jobs-table.has-remove td.col-status {
+    right: 40px;
+  }
+  .jobs-table td.col-remove {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: auto;
+    padding: 0;
+    background: none;
+  }
+  .jobs-table tbody tr:hover td.col-remove {
+    background: none;
+  }
+  .jobs-table td:not(.col-job):not(.col-status):not(.col-remove) {
     display: inline-block;
     width: auto;
     margin: 4px 14px 0 0;

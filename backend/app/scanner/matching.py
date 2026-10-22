@@ -3,8 +3,10 @@
 - The search priority comes from three profile fields, read at scan time: ``search_experience_order``,
   ``search_roles`` and ``search_locations`` (comma-separated, in priority order).
 - A title matches a role with synonyms: Engineer/Developer, SDE1/SDE-1/SDE I, Golang/Go,
-  Backend/Back End, Full Stack/Fullstack. "Software Development Engineer" also matches
-  "Software Engineer", "Software Developer" and a bare "SDE". A title with a level ("SDE-2",
+  Backend/Back End, Full Stack/Fullstack. "Software Development Engineer" and "SDE" are the same
+  role, which also matches "Software Engineer" and "Software Developer"; "Full Stack Engineer" also
+  matches a bare "Fullstack" ("Java Fullstack"). Up to two words may sit between a role's words
+  ("Java Backend Developer" is a Java Developer). A title with a level ("SDE-2",
   "Software Engineer II") matches the leveled role (SDE2) when the list has one; otherwise roles are
   tried in priority order and the first match wins.
 - Internships never match. The minimum experience must be at most the highest level in
@@ -70,9 +72,15 @@ def normalize(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Roles
 
-# Extra ways to say a role, as normalised phrases.
+# Ways to say the same role, as normalised phrases (2026-10-21): a role written as any phrase of a
+# group matches titles with any of them. Engineer/Developer, Back End/Backend and Full Stack/Fullstack
+# are already folded by ``normalize``.
+_ROLE_GROUPS = (
+    ("software development developer", "software developer", "sde"),
+    ("fullstack developer", "fullstack"),
+)
 _ROLE_ALIASES = {
-    "software development developer": ("software developer", "sde"),
+    phrase: tuple(other for other in group if other != phrase) for group in _ROLE_GROUPS for phrase in group
 }
 _LEVELED_ROLE = re.compile(r"^sde (\d)$")
 # "Software Engineer 2" is SDE2, but "Software Engineer 2-4 years" isn't.

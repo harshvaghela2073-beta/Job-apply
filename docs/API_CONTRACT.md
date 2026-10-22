@@ -875,3 +875,80 @@ says "N left out: X another stack, Y senior, Z on your skip list.") and again be
   the invitation dialog.
 - Notes that failed with "no Connect button" before the fix (2026-10-15 12:20 UTC) are tried once
   more.
+
+## Faster, more relevant applying (2026-10-21)
+
+The candidate (now on Naukri Pro, no interview calls yet) restated the targets: Bengaluru,
+16-18 LPA; first 1+ years as SDE / Software Development Engineer / Backend Engineer / Java
+Developer / Full Stack Engineer, then 2+ years as SDE2 / SDE1 and the same roles. Skills: Java,
+Spring Boot, Golang, React, GCP, GKE, Kubernetes, Docker, CI/CD, Redis, SQL, Cassandra, Kafka (plus
+Python, Jenkins, Grafana). Stored as profile fields (`skills`, `search_*`, new `search_salary_lpa`
+= "16-18 LPA").
+
+### Salary rule (both platforms)
+
+- Skip when the job's stated salary range tops out below the lower bound of `search_salary_lpa`
+  (16 LPA): "Salary <range> is below your target 16 LPA." Without `search_salary_lpa` the current
+  CTC is used as before. A job without a stated salary is kept.
+
+### Answers nobody saved (Easy Apply and Naukri's recruiter questions)
+
+The candidate chose (2026-10-21) to let forms finish without waiting for them. When neither the
+profile, a template nor the profile-based rules answer a required question:
+
+| Question | Answer |
+|---|---|
+| Availability, consent or willingness: interviews on any day or in any mode (Saturday, weekend, virtual, face-to-face), background verification, relocating or commuting within Bengaluru, consenting to a recruiter profile / communications, working from office / hybrid in Bengaluru | Yes |
+| Self-rating ("Rate yourself out of 5/10 in X") | 4/5 (8/10) for one of the candidate's skills, 2/5 (4/10) otherwise; for options the closest one |
+| Years with a tool or skill that isn't the candidate's | 0 (as before) |
+| Free text with no saved answer, or anything else | No answer: the job is skipped ("The form asks <question>, which has no saved answer."), not left waiting |
+
+- These answers are marked `source: "default (2026-10-21 policy)"` in the attempt's fields and are
+  saved to the Template Library like other learned answers, so the candidate can change them.
+- Questions about another city (relocating to Pune, etc.) keep the existing No rule.
+
+### LinkedIn
+
+- `linkedin_posts` also scrolls the home feed (`https://www.linkedin.com/feed/`) for hiring posts
+  with a Google Form or an email (posts from the candidate's network), before the searches. Same
+  matching rules; the run message counts feed posts separately.
+- Company-site jobs get their company apply link promptly: each LinkedIn run opens up to 10 new
+  company-site jobs without an `apply_url` and stores the "Apply on company website" target, so the
+  Company Website list opens the company's page directly. Easy Apply jobs that turn out to be
+  company-site get theirs at once (as before).
+
+### Naukri
+
+- The Naukri search uses Naukri's own filters: experience (from `search_experience_order`),
+  location (`search_locations`), salary (the band containing the target), freshness (1 day), one
+  search per role in priority order; plus the logged-in "recommended jobs" list (Naukri's matches for
+  the candidate's profile). Same fit rules.
+
+### Removing a job
+
+- Each job row has a remove (×) button: `PATCH /api/jobs/{id}` with `{ "status": "skipped",
+  "status_reason": "Removed by you." }`. Job lists show only `found`, `needs_manual` and `applied`
+  jobs (the frontend passes these statuses), so removed and rule-skipped jobs disappear.
+- `GET /api/analytics`: `found` counts jobs that aren't `skipped` or `failed`; `pending` is still
+  `found - applied`.
+
+### As built (2026-10-21)
+
+- Default answers cover only the table's categories. Night shifts, bonds, pay, travel, other cities
+  and past interviews get none (the job is skipped). Self-ratings are answered only when the scale
+  is numeric; word levels ("Beginner/Expert") get none.
+- A skipped form's questions still go to unanswered questions. Run messages: "N skipped for a
+  question without a saved answer" (LinkedIn), "N skipped for a recruiter question without a saved
+  answer" (Naukri); the Naukri applier pauses after those too.
+- Company links: jobs found in the past 2 days, at most 10 per run (also when Easy Apply is off). A
+  page without a company link sets "No company apply link on the LinkedIn job page." and isn't
+  reopened; a closed job becomes skipped; the hiring team found there is stored for outreach.
+  Message: "Found company links for N jobs."
+- Feed: up to 7 page loads ("Read N feed posts and M search posts; ..."); `POST_MAX_PAGE_LOADS` is 44.
+  A feed read with 0 posts saves a diagnostic page and is noted, not failed.
+- Naukri: one search per role in priority order, then the logged-in recommended list
+  (`/mnjuser/recommendedjobs`); message "Search: N jobs read; Recommended: M; K matched.", plus
+  "Today's jobs not matched: N not one of your roles, M more experience than yours, K outside
+  Bengaluru." (examples in the log). Live on 2026-10-21 the URL filters `experience=<years>` (one
+  search per experience level) and `jobAge=1` were confirmed and are on (14 matches instead of 1-3);
+  the salary band (`ctcFilter`) stays off because it hides jobs without a stated salary.

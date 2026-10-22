@@ -14,10 +14,12 @@ The drawer asks one question at a time (saved pages of 2026-10-13/14):
 
 After the last answer Naukri applies (the page goes to saveApply, or the button says "Applied").
 
-Nothing is guessed. A question without an answer stops the flow: the application isn't completed
-(Naukri applies only after the last answer), the job is left for the candidate (``needs_manual``)
-and the question goes to the unanswered questions. A dry run never clicks Apply (on a job without
-questions that click applies), so it previews the questions the job asked on its last try.
+Nothing is guessed. A question without an answer (the candidate's defaults of 2026-10-21 included)
+stops the flow: the application isn't completed (Naukri applies only after the last answer), the job
+is skipped ("The form asks <question>, which has no saved answer."; 2026-10-21, instead of waiting
+for the candidate) and the question goes to the unanswered questions. A dry run never clicks Apply
+(on a job without questions that click applies), so it previews the questions the job asked on its
+last try.
 
 Selectors live in ``selectors.py`` (``CHATBOT_*``).
 """
@@ -32,7 +34,7 @@ from sqlmodel import Session, col, select
 
 from app.browser import BrowserSession
 from app.models import UnansweredQuestion
-from app.scanner.applying import ApplyAttempt, ApplyResult
+from app.scanner.applying import ApplyAttempt, ApplyResult, no_saved_answer
 from app.scanner.base import capture_failure
 from app.sources.html import first, soup, text_of
 from app.sources.linkedin.answers import Answer, AnswerBook, FormField, clean_label
@@ -420,12 +422,8 @@ def answer_questions(browser: BrowserSession, answers: AnswerBook, *, kind: str,
                     f"{start} {view.question!r} uses {view.unsupported}, which the tool can't fill yet; "
                     "the application wasn't completed.",
                 )
-            return stop(
-                ApplyResult.questionnaire,
-                f"{start} {view.question!r} has no answer in your profile or Template Library; "
-                "the application wasn't completed.",
-                [form_field.label],
-            )
+            # Skipped, not left waiting (2026-10-21): the application isn't completed.
+            return ApplyAttempt(ApplyResult.skipped, no_saved_answer([form_field.label]), [form_field.label], facts, clicked=True)
         problem = _give(browser, view, answer.value)
         if problem:
             return stop(ApplyResult.no_confirmation, f"Couldn't answer {view.question!r}: {problem}; the application wasn't completed.")

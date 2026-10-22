@@ -1,4 +1,4 @@
-import type { ApplyType, Job, Platform } from '../api/types'
+import type { ApplyType, Job, JobStatus, Platform } from '../api/types'
 
 /** Columns JobsTable can show. `status` (Applied / Pending) always goes last. */
 export type JobColumn =
@@ -17,6 +17,12 @@ export function columnsWithData(columns: JobColumn[], jobs: Job[]): JobColumn[] 
     return !get || jobs.some((job) => !!get(job))
   })
 }
+
+/** Statuses the job lists request: removed (`skipped`) and failed jobs stay out of them. */
+export const LISTED_STATUSES: JobStatus[] = ['found', 'needs_manual', 'applied']
+
+/** `status_reason` of a job the candidate removed with the × button. */
+export const REMOVED_REASON = 'Removed by you.'
 
 /** The UI shows two states: Applied (`applied`) and Pending (every other status). */
 export const isApplied = (job: Pick<Job, 'status'>) => job.status === 'applied'

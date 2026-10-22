@@ -1,11 +1,13 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { api, errorMessage } from '../api/client'
 import type { Job, JobStatusUpdateValue } from '../api/types'
+import type { JobRemoval } from '../hooks/useJobRemoval'
 import { useNow } from '../hooks/usePolling'
 import { APPLY_TYPE_LABEL, formatDateTime, formatRelative, formatUtc, JOB_STATUS_LABEL } from '../lib/format'
 import { applyLink, isApplied, jobLink, type JobColumn as Column } from '../lib/jobs'
 import { PlatformTag } from './Badge'
 import { ExternalLink } from './ExternalLink'
+import { CloseIcon } from './Icons'
 
 const HEADERS: Record<Column, string> = {
   job: 'Job',
@@ -72,6 +74,32 @@ function StatusToggle({ job, saving, error, onToggle }: StatusToggleProps) {
         </span>
       )}
     </>
+  )
+}
+
+interface RemoveButtonProps {
+  job: Job
+  disabled: boolean
+  onRemove: () => void
+  buttonRef: (el: HTMLButtonElement | null) => void
+}
+
+/** The × at the end of a row. */
+function RemoveButton({ job, disabled, onRemove, buttonRef }: RemoveButtonProps) {
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      className="row-remove"
+      data-job-id={job.id}
+      aria-label={`Remove ${job.title} at ${job.company}`}
+      aria-disabled={disabled || undefined}
+      onClick={() => {
+        if (!disabled) onRemove()
+      }}
+    >
+      <CloseIcon />
+    </button>
   )
 }
 
@@ -150,13 +178,19 @@ interface JobsTableProps {
   columns: Column[]
   /** Called with the saved job after its status changes. */
   onStatusChange?: (job: Job) => void
+  /** Adds the remove (×) button after Status. `jobs` should then be `removal.view(...)`'s items. */
+  removal?: Pick<JobRemoval, 'remove' | 'busy' | 'errors'>
 }
 
-/** Shared job list: Dashboard, LinkedIn and Naukri tabs. The Status column toggles Applied / Pending. */
-export function JobsTable({ jobs, columns, onStatusChange }: JobsTableProps) {
+/**
+ * Shared job list: Dashboard, LinkedIn and Naukri tabs. The Status column toggles Applied / Pending;
+ * with `removal`, a × after it removes the row.
+ */
+export function JobsTable({ jobs, columns, onStatusChange, removal }: JobsTableProps) {
   const now = useNow()
   const [overrides, setOverrides] = useState<Record<number, Override>>({})
   const [errors, setErrors] = useState<Record<number, string>>({})
+  const removeButtons = useRef(new Map<number, HTMLButtonElement>())
   const shown = columns.filter((c): c is Exclude<Column, 'status'> => c !== 'status')
 
   const current = (job: Job): Override | undefined => {
@@ -191,9 +225,17 @@ export function JobsTable({ jobs, columns, onStatusChange }: JobsTableProps) {
     }
   }
 
+  const removeRow = (listed: Job, shown: Job, index: number) => {
+    if (!removal) return
+    const hadFocus = document.activeElement === removeButtons.current.get(listed.id)
+    const next = jobs[index + 1] ?? jobs[index - 1]
+    // Keyboard users keep their place: focus moves to the × of the row that takes this one's place.
+    if (removal.remove(listed, shown, index) && hadFocus && next) removeButtons.current.get(next.id)?.focus()
+  }
+
   return (
     <div className="table-wrap">
-      <table className="table jobs-table">
+      <table className={`table jobs-table${removal ? ' has-remove' : ''}`}>
         <thead>
           <tr>
             {shown.map((c) => (
@@ -204,12 +246,19 @@ export function JobsTable({ jobs, columns, onStatusChange }: JobsTableProps) {
             <th className="col-status" scope="col">
               {HEADERS.status}
             </th>
+            {removal && (
+              <th className="col-remove" scope="col">
+                <span className="sr-only">Remove</span>
+              </th>
+            )}
           </tr>
         </thead>
         <tbody>
-          {jobs.map((listed) => {
+          {jobs.map((listed, index) => {
             const override = current(listed)
             const job = override?.job ?? listed
+            const restoring = removal?.busy(job.id) ?? false
+            const removeError = removal?.errors[job.id]
             return (
               <tr key={job.id} className={isApplied(job) ? 'row-applied' : undefined}>
                 {shown.map((c) => (
@@ -220,11 +269,29 @@ export function JobsTable({ jobs, columns, onStatusChange }: JobsTableProps) {
                 <td className="col-status">
                   <StatusToggle
                     job={job}
-                    saving={override?.saving ?? false}
+                    saving={(override?.saving ?? false) || restoring}
                     error={errors[job.id]}
                     onToggle={() => void toggle(listed)}
                   />
+                  {removeError && (
+                    <span className="status-error" role="alert" title={removeError}>
+                      Not removed<span className="sr-only">: {removeError}</span>
+                    </span>
+                  )}
                 </td>
+                {removal && (
+                  <td className="col-remove">
+                    <RemoveButton
+                      job={job}
+                      disabled={(override?.saving ?? false) || restoring}
+                      onRemove={() => removeRow(listed, job, index)}
+                      buttonRef={(el) => {
+                        if (el) removeButtons.current.set(job.id, el)
+                        else removeButtons.current.delete(job.id)
+                      }}
+                    />
+                  </td>
+                )}
               </tr>
             )
           })}

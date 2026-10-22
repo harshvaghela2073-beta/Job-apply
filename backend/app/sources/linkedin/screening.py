@@ -4,7 +4,9 @@ LinkedIn's job page. A job is not applied to (status ``skipped``, with the reaso
 0. Job fit (2026-10-15, ``app.scanner.fit``): the company is on the skip list
    (``search_skip_companies``), or the title is for another stack or too senior.
 1. Salary: the page shows a salary ("₹12,00,000/yr - ₹18,00,000/yr", "₹15L/yr") whose top is below
-   the candidate's current CTC (profile field ``current_ctc``). No salary shown is fine.
+   the lower bound of the candidate's target (profile field ``search_salary_lpa``, "16-18 LPA" -> 16;
+   2026-10-21), or below the current CTC (``current_ctc``) when no target is set. No salary shown
+   is fine.
 2. Skills: fewer than 2 of the candidate's skills (profile field ``skills``) appear in the job's
    title and description (whole words; aliases such as Go/Golang count). Checked only when the
    description was read.
@@ -18,10 +20,13 @@ page selectors live in ``selectors.py`` (``JOB_*``).
 """
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 
+from sqlmodel import Session, select
+
+from app.models import ProfileField
 from app.scanner.applying import StoredJob
-from app.scanner.fit import matching_skills, title_reason, too_few_skills
+from app.scanner.fit import matching_skills, target_salary_lpa, title_reason, too_few_skills
 from app.scanner.matching import is_internship, parse_min_experience
 from app.sources.html import first, select_any, soup, text_of
 from app.sources.linkedin import selectors as S
@@ -30,9 +35,38 @@ from app.sources.naukri.screening import (  # pure text rules, shared with Naukr
     _FRESHER,
     _PLACEHOLDER_COMPANY,
     ApplyRules,
-    load_rules,  # noqa: F401 - re-exported for the applier
     salary_top_lpa,
 )
+from app.sources.naukri.screening import load_rules as _shared_rules
+
+
+@dataclass(frozen=True)
+class LinkedInRules(ApplyRules):
+    """The shared rules plus the salary target's lower bound (``search_salary_lpa``; 2026-10-21)."""
+
+    target_salary_lpa: float | None = None
+
+
+def load_rules(session: Session) -> LinkedInRules:
+    rules = _shared_rules(session)
+    values = {f.name: getattr(rules, f.name) for f in fields(rules)}
+    profile = {f.key: f.value for f in session.exec(select(ProfileField)).all()}
+    values["target_salary_lpa"] = target_salary_lpa(profile)
+    return LinkedInRules(**values)
+
+
+def salary_reason(rules: ApplyRules, salary: str) -> str | None:
+    """Why the job's stated salary is too low: its top below the target's lower bound, or (without a
+    target) below the current CTC. None when it isn't, or no salary is stated."""
+    top = linkedin_salary_top_lpa(salary)
+    if top is None:
+        return None
+    target = getattr(rules, "target_salary_lpa", None)
+    if target is not None:
+        return f"Salary {salary} is below your target {target:g} LPA." if top < target else None
+    if rules.min_salary_lpa is not None and top < rules.min_salary_lpa:
+        return f"Salary {salary} is below your current {rules.min_salary_lpa:g} LPA."
+    return None
 
 
 @dataclass
@@ -167,10 +201,9 @@ def skip_reason(rules: ApplyRules, facts: LinkedInJobFacts, stored: StoredJob | 
     if verdict:
         return verdict[1]
 
-    # 1. Salary below the current CTC.
-    top = linkedin_salary_top_lpa(facts.salary)
-    if rules.min_salary_lpa is not None and top is not None and top < rules.min_salary_lpa:
-        return f"Salary {facts.salary} is below your current {rules.min_salary_lpa:g} LPA."
+    # 1. Salary below the target (or, without one, the current CTC).
+    if reason := salary_reason(rules, facts.salary):
+        return reason
 
     # 2. Fewer than 2 of the candidate's skills in the title and description.
     if rules.skills and facts.description:
