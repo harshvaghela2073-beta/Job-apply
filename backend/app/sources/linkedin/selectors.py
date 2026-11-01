@@ -441,4 +441,7 @@ NOTE_LIMIT_TEXT = (
     "out of personalized invitations",
 )
 EMAIL_REQUIRED_TEXT = ("enter their email", "email address to connect", "to verify this member knows you")
-INVITE_ERROR_TEXT = ("invitation not sent", "unable to send", "couldn't send", "something went wrong")
+INVITE_ERROR_TEXT = ("invitation not sent", "unable to send", "couldn't send", "something went wrong")  # in the dialog or a toast only
+# Where LinkedIn says what happened after Send: its toasts and alerts. The page itself carries hidden
+# translations such as "Sorry, something went wrong" (2026-10-27), so it is never searched for errors.
+INVITE_TOAST = (".artdeco-toast-item", "[data-test-artdeco-toast-item-type]", "[role='alert']", "[role='status']")

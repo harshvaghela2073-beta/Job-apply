@@ -8,7 +8,9 @@ returned or included in an error message.
 use a fake; the real one is ``default_transport``.
 """
 
+import html
 import logging
+import re
 import smtplib
 import ssl
 from dataclasses import dataclass, field
@@ -165,6 +167,57 @@ class Mailer:
             raise self._error(f"The mail server refused: {', '.join(refused)}", connection=False)
 
 
+_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_BULLET = re.compile(r"^\s*[-*•]\s+")
+# Gmail's own default text (Arial, small), full width, so it reads like an email the candidate wrote.
+_HTML_STYLE = "font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5;color:#222222"
+
+
+def email_parts(body: str) -> tuple[str, str]:
+    """The template's light formatting (2026-10-23, the candidate's email): ``**bold**``, lines starting
+    with "- " as bullet lists, blank lines between paragraphs. Returns (plain text without the
+    markers, HTML)."""
+    lines = body.strip().splitlines()
+    plain = "\n".join(_BOLD.sub(r"\1", line).rstrip() for line in lines) + "\n"
+
+    def inline(text: str) -> str:
+        return _BOLD.sub(r"<strong>\1</strong>", html.escape(text.strip(), quote=False))
+
+    blocks: list[str] = []
+    paragraph: list[str] = []
+    bullets: list[str] = []
+
+    def flush() -> None:
+        if paragraph:
+            blocks.append(f'<p style="margin:0 0 10px">{"<br>".join(paragraph)}</p>')
+            paragraph.clear()
+        if bullets:
+            items = "".join(f'<li style="margin:0 0 3px">{item}</li>' for item in bullets)
+            blocks.append(f'<ul style="margin:0 0 10px;padding-left:20px">{items}</ul>')
+            bullets.clear()
+
+    blank_run = 0
+    for line in lines:
+        if not line.strip():
+            flush()
+            blank_run += 1
+            if blank_run == 2:  # two blank lines: a bigger gap, as the candidate writes it (2026-10-23)
+                blocks.append('<div style="height:12px"></div>')
+            continue
+        blank_run = 0
+        if _BULLET.match(line):
+            if paragraph:
+                flush()
+            bullets.append(inline(_BULLET.sub("", line)))
+        else:
+            if bullets:
+                flush()
+            paragraph.append(inline(line))
+    flush()
+    document = f'<!doctype html><html><body><div style="{_HTML_STYLE}">{"".join(blocks)}</div></body></html>'
+    return plain, document
+
+
 def build_email(
     template: Template,
     *,
@@ -193,6 +246,8 @@ def build_email(
     message["Date"] = formatdate(localtime=True)
     domain = config.user.rsplit("@", 1)[-1] if "@" in config.user else None
     message["Message-ID"] = make_msgid(domain=domain)
-    message.set_content(body.strip() + "\n")
+    plain, rich = email_parts(body)
+    message.set_content(plain)  # for mail apps that show plain text
+    message.add_alternative(rich, subtype="html")  # bold labels and bullet lists
     message.add_attachment(data, maintype="application", subtype="pdf", filename=resume.name)
     return message

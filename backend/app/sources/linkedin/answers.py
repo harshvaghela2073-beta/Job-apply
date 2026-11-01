@@ -176,11 +176,16 @@ def wants_whole_number(field: FormField) -> bool:
 def _plain_number_if_rejected(field: FormField, answer: Answer) -> Answer:
     """The form rejected the answer in a text box that takes numbers only (seen live on 2026-10-14:
     "12 LPA" and "30 days" got "Invalid input"; "1.9" and "0" were accepted): the same answer as a
-    plain number, with its unit dropped ("12 LPA" -> "12"). Answers without exactly one number stay."""
+    plain number, with its unit dropped ("12 LPA" -> "12"). A rejected decimal becomes the nearest
+    whole number ("1.9" -> "2"; 2026-10-28, a saved "years with Java?" answer on a form that takes
+    whole numbers only). Answers without exactly one number stay."""
     if answer.value is None or not field.error or field.type not in TEXT_TYPES or field.type == "textarea":
         return answer
     if _PLAIN_NUMBER.match(answer.value):
-        return answer
+        if "." not in answer.value:
+            return answer
+        whole = str(int(math.floor(float(answer.value) + 0.5)))
+        return Answer(whole, f"{answer.reason}; as a whole number (the form rejected {answer.value.strip()!r})")
     numbers = _NUMBER.findall(answer.value)
     if len(numbers) != 1:
         return answer

@@ -524,12 +524,14 @@ setting is on:
 
 **LinkedIn connection notes (`linkedin_outreach`, after `email_send`)**, while the
 `auto_send_linkedin_notes` setting is on and LinkedIn is connected:
-- **Who:** people found today from two sources:
+- **Who:** people found today from two sources (narrowed on 2026-10-27, see "Who gets notes and
+  emails"):
   1. the "Meet the hiring team" section on LinkedIn job pages, for jobs the tool stored
   2. the authors of matching hiring posts
 - **The note:** built from a `linkedin_message` Template, with `[Name]` (first name) and `[Company]`
   filled. Templates mentioning Easy Apply are used only for jobs that were applied to. The
-  filled-in note must be at most 300 characters, otherwise that person is skipped.
+  filled-in note must be at most 300 characters, otherwise that person is skipped. Since
+  2026-10-27 only templates with both `[Job title]` and `[Company]` are used.
 - **Sending:** from the person's profile, Connect (or More → Connect) → "Add a note" → fill → Send.
   - If "Connect" isn't available (already connected, pending, or follow-only), the person is
     skipped.
@@ -952,3 +954,66 @@ profile, a template nor the profile-based rules answer a required question:
   Bengaluru." (examples in the log). Live on 2026-10-21 the URL filters `experience=<years>` (one
   search per experience level) and `jobAge=1` were confirmed and are on (14 matches instead of 1-3);
   the salary band (`ctcFilter`) stays off because it hides jobs without a stated salary.
+
+### Email formatting (2026-10-23)
+
+- The email template may use light formatting: `**bold**`, lines starting with `- ` as bullet lists,
+  and blank lines between paragraphs. Each email is sent as `multipart/alternative` (plain text
+  without the `**` markers, and HTML with `<strong>`, `<ul>` and paragraphs) plus the resume PDF.
+- The email's subject is "[Job title] Opportunity - Harsh Vaghela"; the body is the candidate's own
+  text (2026-10-23, confirmed), with their bold parts; two blank lines make a bigger gap. Text is
+  Gmail's default (Arial 13px), full width.
+
+### Email addresses and posts abroad (2026-10-23)
+
+- Addresses found in posts are cleaned: a word glued on after the ending is cut ("gmail.comsubject"
+  -> "gmail.com"), "contact-" / "email:" and similar prefixes are dropped, and an ending that is
+  neither a country code nor a known generic one is rejected ("node@wall.counter").
+- A hiring post that names no preferred location is left out as "abroad" when it names a place
+  abroad (Dubai, London, Jakarta, ...) or when every address belongs to a company abroad (a country
+  ending other than .in: .co.id, .ae, .co.uk, .com.au, .sg, .my, .us, ...; .co, .io, .ai and similar
+  count as generic).
+- The email sender checks stored posts the same way before sending: "Not emailed: <address> isn't a
+  usable email address." / "Not emailed: <address> belongs to a company abroad."; the run message
+  counts them as "N skipped (abroad or not a real address)".
+
+### Who gets notes and emails (2026-10-27)
+
+Replies to the first notes and emails showed many went to the wrong people: job seekers, recruiters
+hiring only abroad, people who aren't recruiters, and reshared job alerts. Since 2026-10-27 only
+people hiring for one of the candidate's roles, in **Bengaluru or remote in India**, are written to.
+
+- **Hiring posts:**
+  - A job seeker's post ("open to work", "I'm looking for my next opportunity", internships done,
+    "Hello recruiters, consultants available") is never kept, even with a Google Form. The new
+    `linkedin_posts` left-out reason is "a job seeker's post".
+  - A post with an email and no Google Form is kept, and so emailed, only when all of these hold:
+    - it isn't a job alert or another company's opening ("Uber is hiring" from someone at another
+      company, "job updates" channels, several "Company:" lines);
+    - it names Bengaluru, or remote work in India;
+    - its author is hiring: their headline shows a hiring role (recruiter, talent acquisition, HR,
+      founder, CTO, engineering manager, ...) or the post says so ("we're hiring", "my team", "join
+      us").
+
+    The left-out reasons for these are "a job alert or another company's opening (email)", "not in
+    Bengaluru or remote in India (email)" and "not posted by someone hiring (email)".
+  - The author gets a connection note only when the same rules hold and the company is known (from
+    their headline). Otherwise the job keeps no contact. A Google Form post is still listed for the
+    candidate.
+- **"Meet the hiring team":**
+  - only for jobs whose location is in Bengaluru or remote in India; a plain "Remote" location
+    doesn't count;
+  - never someone whose headline says they're looking for a job.
+- **The note** always names the role and the company:
+  - It uses the job's title, or its shorter matched role when the note would be over 300 characters.
+  - A job whose role or company isn't known is skipped: "N skipped (role or company not known)".
+  - The candidate's note templates got `[Job title]` and `[Company]` added; the rest of the text is
+    unchanged.
+- **Send confirmation:**
+  - LinkedIn's pages carry hidden translations such as "Sorry, something went wrong", which were read
+    as an error after every Send. Hidden elements are now ignored, and errors are read only from the
+    invitation dialog and LinkedIn's toasts.
+  - On the invitation page, the dialog closing with no error counts as sent.
+  - The 116 notes recorded as "LinkedIn said 'something went wrong' after Send" since 2026-10-21 are
+    now `sent`: replies to them came back. They count toward the caps.
+

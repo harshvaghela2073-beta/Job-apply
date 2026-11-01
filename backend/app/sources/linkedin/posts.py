@@ -19,8 +19,11 @@ the saved login; skipped when LinkedIn isn't connected.
 - The run message counts the feed and search posts read, those with a form or an email, and why
   matching ones were left out (``LEFT_OUT``); each Google Form post's decision is logged.
 - A login wall or security check marks LinkedIn as disconnected and stops the run.
-- The post's author (name and profile link, when a person posted it) is stored on the job: they get
-  a connection note from ``linkedin_outreach`` while that switch is on.
+- A job seeker's post is never kept. A post with an email and no Google Form is kept only when that
+  email may be sent (``app.sources.linkedin.hiring``, 2026-10-27): not a job alert or a reshare, in
+  Bengaluru or remote in India, posted by someone hiring.
+- The post's author (name and profile link) is stored on the job only when they may get a connection
+  note from ``linkedin_outreach`` (``post_outreach_problem``: the same rules, and the company known).
 """
 
 import logging
@@ -56,11 +59,13 @@ from app.scanner.store import finish_scan
 from app.timeutils import to_utc
 from app.sources.linkedin import selectors as S
 from app.sources.linkedin.jobs import LOCAL_TZ, next_search_after, search_interval
+from app.sources.linkedin.hiring import REASONS, is_seeker_post, post_outreach_problem
 from app.sources.linkedin.login import LINKEDIN_LOGIN
 from app.sources.linkedin.parse import (
     Post,
     company_from_headline,
     find_emails,
+    foreign_email,
     find_form_links,
     find_short_links,
     parse_posts,
@@ -93,8 +98,27 @@ LEFT_OUT = {
     "senior": "a senior role",
     "experience": "more experience than yours",
     "city": "another city",
+    "abroad": "abroad",
     "company": "on your skip list",
+    # 2026-10-27 (app.sources.linkedin.hiring): a job seeker's post is never kept; a post with only an
+    # email is kept only when that email may be sent.
+    "seeker": "a job seeker's post",
+    "reshare": "a job alert or another company's opening (email)",
+    "location": "not in Bengaluru or remote in India (email)",
+    "author": "not posted by someone hiring (email)",
 }
+
+# A post that names no preferred location but a place abroad (2026-10-23: emails had gone to
+# Indonesia, the UAE, the UK, Australia, ...).
+_ABROAD = re.compile(
+    r"\b(?:usa|united states|canada|toronto|united kingdom|london|england|ireland|dublin|germany|berlin|munich|"
+    r"netherlands|amsterdam|france|paris|spain|portugal|italy|poland|switzerland|sweden|europe|uae|dubai|"
+    r"abu dhabi|saudi|riyadh|jeddah|qatar|doha|kuwait|bahrain|oman|muscat|singapore|malaysia|kuala lumpur|"
+    r"indonesia|jakarta|thailand|bangkok|vietnam|philippines|manila|australia|sydney|melbourne|new zealand|"
+    r"japan|tokyo|uzbekistan|tashkent|egypt|cairo|nigeria|lagos|kenya|nairobi|pakistan|karachi|lahore|"
+    r"islamabad|bangladesh|dhaka|sri lanka|colombo|nepal|kathmandu)\b",
+    re.I,
+)
 
 
 def post_queries(roles: tuple[str, ...]) -> list[str]:
@@ -362,6 +386,8 @@ class LinkedInPostsScanner:
             return None, "contact"
         if is_course_ad(post.text):
             return None, "course"
+        if is_seeker_post(post.text, post.headline):
+            return None, "seeker"
         headline_company = company_from_headline(post.headline)
         if skip_listed([headline_company, post.author], prefs.skip_companies):
             return None, "company"
@@ -380,9 +406,19 @@ class LinkedInPostsScanner:
         if location_index is None:
             if mentions_other_city(prefs.locations, post.text):
                 return None, "city"
+            if _ABROAD.search(post.text) or (emails and not forms and all(foreign_email(e) for e in emails)):
+                return None, "abroad"
             location_index = len(prefs.locations) - 1  # no location named
         else:
             location = prefs.locations[location_index]
+        # Only someone hiring for a role in Bengaluru (or remote in India) is emailed or sent a note.
+        if not forms and not assume_form:
+            problem = post_outreach_problem(post.text, post.headline, headline_company, need_company=False)
+            if problem:
+                return None, problem
+        note_problem = post_outreach_problem(post.text, post.headline, headline_company) if post.author_url else "author"
+        if note_problem and post.author_url:
+            logger.info("No note to the author of %s: %s", post.url, REASONS[note_problem])
         company = headline_company or post.author or "LinkedIn post"
         return Candidate(
             platform=self.platform,
@@ -400,7 +436,7 @@ class LinkedInPostsScanner:
             short_description=truncate(post.text),
             posted_at=posted,
             experience=experience_phrase(post.text),
-            # The author gets a connection note later (outreach.py), when it's a person.
-            contact_name=(post.author or None) if post.author_url else None,
-            contact_profile_url=post.author_url,
+            # The author gets a connection note later (outreach.py), when they are hiring (hiring.py).
+            contact_name=None if note_problem else post.author,
+            contact_profile_url=None if note_problem else post.author_url,
         ), ""

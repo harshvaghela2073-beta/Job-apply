@@ -246,6 +246,19 @@ def test_inline_error_gets_the_whole_number(fake_browser):
     assert row["value"] == "2" and "whole number" in row["reason"]
 
 
+def test_saved_decimal_answer_rejected_becomes_a_whole_number(fake_browser):
+    """2026-10-28: "How many years of work experience do you have with Java?" had a saved answer
+    "1.9" (a template) on a form that takes whole numbers only; the job was skipped."""
+    book = AnswerBook(profile=BOOK.profile, templates=[*BOOK.templates, ("How many years of work experience do you have with Java?", "1.9")])
+    java = FakeField("How many years of work experience do you have with Java?", "text", validate=whole_number)
+    form = scripted(fake_browser, contact_step(), questions_step(java), review_step())
+    attempt = apply_easy(browser_for(fake_browser), JOB_URL, book)
+    assert attempt.result == ApplyResult.applied and form.submitted
+    assert [v for label, v in form.fills if label == java.label] == ["1.9", "2"]  # never "1.9" again
+    row = next(r for r in attempt.facts["fields"] if r["label"] == java.label)
+    assert row["value"] == "2" and "whole number" in row["reason"]
+
+
 def plain_number(value: str) -> str:
     return "" if re.fullmatch(r"\d+(?:\.\d+)?", value) else "Invalid input"
 

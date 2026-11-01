@@ -4,7 +4,9 @@ the ``auto_send_email`` switch is on.
 
 - **Which jobs:** jobs found in the last ``PENDING_DAYS`` days (today and yesterday: posts the daily
   cap held back on 2026-10-14 were otherwise never sent) with apply type ``email``, status ``found``
-  and a ``contact_email``, most important (lowest ``priority``) first.
+  and a ``contact_email``, most important (lowest ``priority``) first. Since 2026-10-27 such posts
+  are kept only when someone is hiring in Bengaluru or remote in India
+  (``app.sources.linkedin.hiring``).
 - **The message:** the first non-empty ``email`` template, filled in (``app.services.outreach``),
   with the resume at ``RESUME_PATH`` attached, sent through Gmail SMTP (``app.services.mailer``).
 - **Limits:** at most ``EMAIL_MAX_PER_RUN`` attempts per run and ``EMAIL_DAILY_CAP`` sent per day;
@@ -29,6 +31,7 @@ from sqlmodel import Session, col, select
 from app.models import ApplyType, Job, JobStatus, OutreachKind, OutreachMessage, OutreachStatus, ScanKind, ScanStatus
 from app.scanner.base import ScanContext, ScanOutcome
 from app.scanner.fit import company_reason, skip_listed
+from app.sources.linkedin.parse import clean_email, foreign_email
 from app.services.app_settings import AUTO_SEND_EMAIL, get_flag
 from app.services.mailer import Mailer, MailError, SmtpConfig, build_email
 from app.services.outreach import (
@@ -118,7 +121,7 @@ class EmailSender:
 
         mailer = Mailer(config, self.transport_factory)
         since = to_utc(ctx.now) - timedelta(days=DEDUPE_DAYS)
-        counts = {"sent": 0, "failed": 0, "duplicate": 0, "skip_list": 0}
+        counts = {"sent": 0, "failed": 0, "duplicate": 0, "skip_list": 0, "unusable": 0}
         attempts = 0
         failure = None
         for job_id in job_ids:
@@ -137,7 +140,21 @@ class EmailSender:
                     session.commit()
                     counts["skip_list"] += 1
                     continue
-                address = job.contact_email.strip().lower()
+                # Saved before the address and location checks (2026-10-23): a malformed address or a
+                # company abroad (when the post names no Bengaluru location) isn't emailed.
+                address = clean_email(job.contact_email)
+                why = None
+                if address is None:
+                    why = f"{job.contact_email} isn't a usable email address."
+                elif foreign_email(address) and "bengaluru" not in (job.location or "").lower():
+                    why = f"{address} belongs to a company abroad."
+                if why:
+                    job.status = JobStatus.skipped
+                    job.status_reason = f"Not emailed: {why}"
+                    session.add(job)
+                    session.commit()
+                    counts["unusable"] += 1
+                    continue
                 previous = last_emailed(session, address, since)
                 if previous is not None:
                     job.status = JobStatus.skipped
@@ -186,6 +203,8 @@ class EmailSender:
             parts.append(f"{counts['duplicate']} skipped (address already emailed in the last {DEDUPE_DAYS} days)")
         if counts["skip_list"]:
             parts.append(f"{counts['skip_list']} skipped (on your skip list)")
+        if counts["unusable"]:
+            parts.append(f"{counts['unusable']} skipped (abroad or not a real address)")
         if counts["failed"]:
             parts.append(f"{counts['failed']} refused by the mail server")
         message_text = ", ".join(parts) + "."

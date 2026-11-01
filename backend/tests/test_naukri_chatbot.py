@@ -471,10 +471,15 @@ def test_a_rejected_answer_with_a_unit_is_sent_again_as_a_plain_number():
 
 
 def test_a_rejected_answer_is_not_sent_twice():
-    job = FakeNaukriJob("2010", [Q("Total years of experience", reject="Please enter a valid number")])
-    attempt = run(job, book())
-    assert attempt.result == ApplyResult.no_confirmation and job.sent == ["1.9"]
+    projects = "How many projects have you led?"
+    job = FakeNaukriJob("2010", [Q(projects, reject="Please enter a valid number")])
+    attempt = run(job, book(**{projects: "3"}))
+    assert attempt.result == ApplyResult.no_confirmation and job.sent == ["3"]
     assert "didn't accept" in attempt.detail
+    # A decimal is tried once more as the nearest whole number, whatever the error says (2026-10-28).
+    job = FakeNaukriJob("2011", [Q("Total years of experience", reject="Please enter a valid number")])
+    attempt = run(job, book())
+    assert attempt.result == ApplyResult.applied and job.sent == ["1.9", "2"]
 
 
 def test_date_boxes():

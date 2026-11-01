@@ -433,3 +433,66 @@ def test_skip_listed_companies_are_not_emailed(client):
     with Session(engine) as session:
         skipped = session.exec(select(Job).where(Job.company == "Jobgether")).one()
         assert skipped.status == JobStatus.skipped and skipped.status_reason == "Not emailed: Jobgether is on your skip list."
+
+
+# ---------------------------------------------------------------------------
+# Formatting (2026-10-23): **bold**, "- " bullets and paragraphs, sent as plain text + HTML.
+
+FORMATTED = """Hi Team,
+
+I'm a Software Engineer at Acme <Labs>, Bengaluru.
+
+My work includes:
+
+- **Core Backend Systems:** Moved an 800+ RPS API from Java to Go.
+- **Production Engineering:** Deployments & monitoring.
+
+**Professional Details:**
+- Current CTC: ₹14 LPA
+- Notice Period: 30 days
+
+Phone: 9000000001
+Email: candidate@example.com
+
+Regards,
+Asha Example"""
+
+
+def test_email_parts_render_bold_bullets_and_paragraphs():
+    from app.services.mailer import email_parts
+
+    plain, rich = email_parts(FORMATTED)
+    assert "**" not in plain and "- Core Backend Systems: Moved an 800+ RPS API from Java to Go." in plain
+    assert "₹14 LPA" in plain and plain.endswith("Asha Example\n")
+    assert "<strong>Core Backend Systems:</strong> Moved an 800+ RPS API" in rich
+    assert "<strong>Professional Details:</strong>" in rich and "**" not in rich
+    assert rich.count("<ul") == 2 and rich.count("<li") == 4
+    assert "Acme &lt;Labs&gt;" in rich and "Deployments &amp; monitoring." in rich  # escaped
+    assert '<p style="margin:0 0 10px">Phone: 9000000001<br>Email: candidate@example.com</p>' in rich
+    assert "<p" in rich and "Regards,<br>Asha Example" in rich
+
+
+def test_the_email_has_plain_html_and_the_resume(tmp_path):
+    from app.models import Template, TemplateKind
+    from app.services.mailer import SmtpConfig, build_email
+
+    resume = tmp_path / "Resume.pdf"
+    resume.write_bytes(b"%PDF-1.4 test")
+    template = Template(kind=TemplateKind.email, question="Email", answer=FORMATTED, subject="[Job title] Opportunity")
+    config = SmtpConfig(host="smtp.example.com", port=587, user="candidate@example.com",
+                        password=SecretStr("x"), from_name="Asha Example")
+    message = build_email(template, config=config, to="hr@acme.com", resume_path=resume, job_title="Backend Developer")
+    assert message["Subject"] == "Backend Developer Opportunity"
+    assert "**" not in message.get_body(("plain",)).get_content()
+    assert "<strong>Professional Details:</strong>" in message.get_body(("html",)).get_content()
+    assert [part.get_filename() for part in message.iter_attachments()] == ["Resume.pdf"]
+
+
+def test_two_blank_lines_make_a_bigger_gap():
+    from app.services.mailer import email_parts
+
+    plain, rich = email_parts("First paragraph.\n\n\nDetails:\nLocation: Bengaluru")
+    assert plain == "First paragraph.\n\n\nDetails:\nLocation: Bengaluru\n"
+    assert rich.count('<div style="height:12px"></div>') == 1
+    single = email_parts("First paragraph.\n\nDetails:")[1]
+    assert '<div style="height:12px">' not in single

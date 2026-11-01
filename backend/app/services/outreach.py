@@ -5,9 +5,10 @@ counting what was already sent.
 Placeholders (case-insensitive):
 
 - ``[Job title]``: the job title without " (hiring post)".
-- ``[Company]``: the company, when known; otherwise "your company". The hiring-post scanner falls
-  back to the author's name or "LinkedIn post" when a post doesn't say the company, so those count
-  as unknown.
+- ``[Company]``: the company, when known; otherwise "your company" in emails. The hiring-post
+  scanner falls back to the author's name or "LinkedIn post" when a post doesn't say the company, so
+  those count as unknown. A connection note always names the role and the company (2026-10-27):
+  without them the person is skipped (``MissingDetail``).
 - ``[Name]``: the person's first name, when known; otherwise "Hi [Name]" becomes "Hi there" (and
   "Dear [Name]" "Dear Hiring Team").
 
@@ -50,6 +51,15 @@ _HONORIFICS = {"dr", "mr", "mrs", "ms", "miss", "er", "ca", "adv", "prof", "shri
 
 class DraftProblem(ValueError):
     """The template can't be turned into a message that is ready to send."""
+
+
+class MissingDetail(DraftProblem):
+    """The job's role or company isn't known, so a note can't name them."""
+
+
+def is_hiring_post(title: str | None) -> bool:
+    """Whether a job came from a LinkedIn hiring post (its title ends with " (hiring post)")."""
+    return " ".join((title or "").split()).lower().endswith(HIRING_POST_SUFFIX)
 
 
 def clean_job_title(title: str | None) -> str:
@@ -136,6 +146,11 @@ def note_templates(session: Session) -> list[Template]:
         t for t in rows
         if t.is_answered and not (t.subject or "").strip() and not _GROUP_TEMPLATE.search(f"{t.question} {t.answer}")
     ]
+
+
+def names_role_and_company(template: Template) -> bool:
+    """Whether a note template has both ``[Job title]`` and ``[Company]`` (2026-10-27: every note does)."""
+    return bool(_JOB_TITLE.search(template.answer or "") and _COMPANY.search(template.answer or ""))
 
 
 def mentions_easy_apply(template: Template) -> bool:

@@ -237,7 +237,7 @@ FEED_FORM = sdui_post(
 )
 FEED_EMAIL = sdui_post(
     "expandedFeEd02FeedType_MAIN_FEED_RELEVANCE", "Ravi Example",
-    "Hiring Java Developer, 2+ years, Bengaluru. Mail your resume to talent@example-labs.example",
+    "Hiring Java Developer, 2+ years, Bengaluru. Mail your resume to talent@example-labs.com",
 )
 FEED_OLD = sdui_post(
     "expandedFeEd03FeedType_MAIN_FEED", "Mira Example", "Hiring Java Developer, Bengaluru. jobs@example.com", ago="3d",
@@ -254,7 +254,7 @@ def test_feed_posts_parse_with_any_feed_type():
     assert (first.urn, second.urn) == ("sdui:urn:li:activity:7390000000000000001", "sdui:FeEd02")
     assert (first.author, first.author_url) == ("Asha Example", "https://www.linkedin.com/in/asha-example/")
     assert first.headline == "Recruiter at Example Labs" and first.time_label.startswith("2h")
-    assert "forms.gle/FeedForm1" in first.text and "talent@example-labs.example" in second.text
+    assert "forms.gle/FeedForm1" in first.text and "talent@example-labs.com" in second.text
 
 
 def test_feed_post_whose_text_sits_in_an_inner_wrapper():
@@ -299,7 +299,7 @@ def test_feed_is_read_first_and_counted_apart(client, fake_browser):
     by_id = {c.external_id: c for c in report.candidates}
     assert set(by_id) == {"sdui:urn:li:activity:7390000000000000001", "sdui:FeEd02", "sdui:Srch01"}
     assert by_id["sdui:urn:li:activity:7390000000000000001"].form_url == "https://forms.gle/FeedForm1"
-    assert by_id["sdui:FeEd02"].contact_email == "talent@example-labs.example"
+    assert by_id["sdui:FeEd02"].contact_email == "talent@example-labs.com"
     (note,) = [n for n in report.notes if n.startswith("Read ")]
     assert note.startswith("Read 3 feed posts and 1 search posts;")
     assert "1 too old" in note  # the same rules: a 3-day-old email post

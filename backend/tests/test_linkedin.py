@@ -116,7 +116,7 @@ FORM_POST = post_html(
 )
 EMAIL_POST = post_html(
     "urn:li:activity:7381000000000000002",
-    "Hiring SDE-2 | Golang | Remote. 2+ years. Share your resume at Jobs.Acme@Example.com.",
+    "Hiring SDE-2 | Golang | Remote (India). 2+ years. Share your resume at Jobs.Acme@Example.com.",
     headline="Talent Acquisition @ Example Labs",
 )
 NEITHER_POST = post_html("urn:li:activity:7381000000000000003", "Hiring Java Developers in Bengaluru! DM me.")
@@ -229,10 +229,12 @@ def test_posts_skip_list_and_senior_roles(client):
     assert judge("We're hiring a Team Lead (Java Developer). jobs@acme.com") == (None, "senior")
     assert judge("Hiring Sr. Java Developer! jobs@acme.com") == (None, "senior")
     assert judge("Hiring SDE-3 (Backend Developer). jobs@acme.com") == (None, "senior")
-    junior, _ = judge("Hiring Senior Backend Developer.\nAlso hiring SDE1 for payments (1-3 years). jobs@acme.com")
+    junior, _ = judge("Hiring Senior Backend Developer.\nAlso hiring SDE1 for payments (1-3 years), Bengaluru. jobs@acme.com")
     assert junior is not None and junior.matched_role == "SDE1"
     assert judge("Hiring manager here, we're hiring Java Developers in Bangalore, jobs@acme.com")[0] is not None
-    assert judge("Hiring SDE2 (Backend Developer), 2+ years. jobs@acme.com")[0] is not None
+    assert judge("Hiring SDE2 (Backend Developer), 2+ years, Bengaluru. jobs@acme.com")[0] is not None
+    # An email-only post must name Bengaluru (or remote in India) to be emailed (2026-10-27).
+    assert judge("Hiring SDE2 (Backend Developer), 2+ years. jobs@acme.com") == (None, "location")
 
 
 def test_posts_scan_counts_senior_and_skip_listed_posts(client, fake_browser):
@@ -240,7 +242,7 @@ def test_posts_scan_counts_senior_and_skip_listed_posts(client, fake_browser):
         post_html("urn:li:activity:7381000000000000031", "Hiring Senior Backend Developer in Bangalore. jobs@acme.com"),
         post_html("urn:li:activity:7381000000000000032", "Hiring Backend Developers (1-3 years). jobs@scoutit.com",
                   headline="Recruiter at Scoutit | Hiring"),
-        post_html("urn:li:activity:7381000000000000033", "Hiring Java Developers (1-3 years). jobs@acme.com"),
+        post_html("urn:li:activity:7381000000000000033", "Hiring Java Developers (1-3 years) in Bengaluru. jobs@acme.com"),
     ]
     html = "<html><body><ul>" + "".join(f"<li>{p}</li>" for p in posts) + "</ul></body></html>"
     fake_browser.routes = [("search/results/content", page("https://www.linkedin.com/search/results/content/?keywords=x", html))]
@@ -352,3 +354,62 @@ def test_short_links_of_a_week_old_post_are_followed(client, fake_browser):
     report = LinkedInPostsScanner().scan(FakeSession(fake_browser, None, True), make_ctx(client.app, NOW))
     forms = [c for c in report.candidates if c.form_url == "https://forms.gle/WEEK1"]
     assert forms and forms[0].apply_type == ApplyType.google_form
+
+
+# ---------------------------------------------------------------------------
+# Email addresses and posts abroad (2026-10-23: "node@wall.counter", "...@gmail.comsubject",
+# "contact-...@gmail.com"; emails had gone to Indonesia, the UAE, the UK, Australia, ...)
+
+
+@pytest.mark.parametrize(
+    ("raw", "clean"),
+    [
+        ("HR@Acme.com.", "hr@acme.com"),
+        ("contact-priya.hr@gmail.com", "priya.hr@gmail.com"),
+        ("email:jobs@acme.in", "jobs@acme.in"),
+        ("irohith01@gmail.comsubject", "irohith01@gmail.com"),
+        ("careers@acme.co.in", "careers@acme.co.in"),
+        ("talent@acme.io", "talent@acme.io"),
+        ("hello@acme.solutions", "hello@acme.solutions"),
+        ("node@wall.counter", None),
+        ("logo@2x.png", None),
+    ],
+)
+def test_clean_email(raw, clean):
+    from app.sources.linkedin.parse import clean_email
+
+    assert clean_email(raw) == clean
+
+
+@pytest.mark.parametrize(
+    ("email", "foreign"),
+    [
+        ("hr@acme.com", False), ("hr@acme.in", False), ("hr@acme.co.in", False), ("hr@acme.io", False),
+        ("hr@acme.ai", False), ("hr@acme.co", False),
+        ("hr@acme.co.id", True), ("hr@acme.ae", True), ("hr@acme.co.uk", True), ("hr@acme.com.au", True),
+        ("hr@acme.com.sg", True), ("hr@acme.my", True), ("hr@acme.us", True),
+    ],
+)
+def test_foreign_email(email, foreign):
+    from app.sources.linkedin.parse import foreign_email
+
+    assert foreign_email(email) is foreign
+
+
+def test_posts_abroad_are_left_out(client):
+    from app.sources.linkedin.parse import Post
+
+    scanner = LinkedInPostsScanner()
+    ctx = make_ctx(client.app, NOW)
+    matcher = RoleMatcher(ctx.prefs.roles)
+
+    def judge(text):
+        return scanner.judge(Post(urn="urn:li:activity:1", text=text, time_label="1h •"), ctx, matcher)[1]
+
+    assert judge("We're hiring a Backend Developer (1-3 years). Send your CV to hr@acme.co.id") == "abroad"
+    assert judge("Hiring Backend Developer (2 years) in Dubai. Email careers@acme.com") == "abroad"
+    assert judge("We're hiring a Backend Developer (2 years), Bengaluru. Email hr@acme.ae") == ""  # Bengaluru named
+    # 2026-10-27: an email-only post must name Bengaluru (or remote in India), and come from someone
+    # hiring (a hiring headline, or "we're hiring"; this post shows no headline).
+    assert judge("We're hiring a Backend Developer (2 years). Email hr@acme.com") == "location"
+    assert judge("Hiring Backend Developer (2 years), Bengaluru. Email hr@acme.com") == "author"

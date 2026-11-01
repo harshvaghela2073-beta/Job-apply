@@ -22,7 +22,7 @@ from app.models import (
 )
 from app.scanner.base import LoginWall
 from app.services.app_settings import AUTO_SEND_LINKEDIN_NOTES, set_flag
-from app.services.outreach import DraftProblem, note_templates
+from app.services.outreach import DraftProblem, MissingDetail, note_templates
 from app.sources.linkedin.easy_apply import remember_hiring_team
 from app.sources.linkedin.outreach import (
     LinkedInOutreach,
@@ -42,13 +42,18 @@ NOTE = "Hi Priya, I'm Harsh, an SDE with 1.9+ years of experience. I noticed ope
 
 INTERESTED = (
     "Hi [Name], I’m Harsh Vaghela, an SDE at VerSe Innovation (Dailyhunt) with 1.9+ years of experience. I noticed "
-    "openings at [Company] that match my profile. I’d be grateful if you could consider me for a relevant role. "
-    "Looking forward to connecting!"
+    "the [Job title] opening at [Company] that matches my profile. I’d be grateful if you could consider me for a "
+    "relevant role. Looking forward to connecting!"
 )
 AFTER_EASY_APPLY = (
     "Hi, I have 1.9+ years of experience as an SDE and I'm looking for an opportunity. I've applied through Easy Apply "
-    "for the position. It would be helpful if you could look into my profile and consider whether I'm a good fit."
+    "for the [Job title] position at [Company]. It would be helpful if you could look into my profile and consider "
+    "whether I'm a good fit."
 )
+
+
+def after_easy_apply(title: str, company: str) -> str:
+    return AFTER_EASY_APPLY.replace("[Job title]", title).replace("[Company]", company)
 
 
 def hiring_team_html(*people) -> str:
@@ -240,6 +245,24 @@ def test_short_note_box_and_send_errors(fake_browser):
     assert attempt.result == NoteResult.sent_without_note and "Add a note" not in profile.clicks
 
 
+def test_hidden_translations_are_no_error_and_a_closed_dialog_means_sent(fake_browser):
+    """2026-10-27: 116 notes were recorded as "LinkedIn said 'something went wrong'" although they were
+    sent (replies came back): the words were in LinkedIn's hidden translations. On the invitation page
+    the dialog just closes after Send, with no toast and no "Pending"."""
+    from app.sources.html import visible_text
+
+    profile = FakeProfile(on_send="quiet")
+    assert "something went wrong" not in visible_text(profile.html()).lower()
+    assert read_profile(profile.html()).error == ""
+    attempt = send_connection_note(profile_browser(fake_browser, profile), PRIYA, NOTE)
+    assert attempt.result == NoteResult.sent and "dialog closed" in attempt.detail and profile.sent
+
+    fake_browser.forms.clear()
+    profile = FakeProfile(on_send="nothing")  # the dialog stays open: not sent
+    attempt = send_connection_note(profile_browser(fake_browser, profile), PRIYA, NOTE)
+    assert attempt.result == NoteResult.failed and "no confirmation" in attempt.detail
+
+
 def test_login_wall_on_the_profile(fake_browser):
     fake_browser.routes = [("linkedin.com", page("https://www.linkedin.com/checkpoint/challenge/x"))]
     with pytest.raises(LoginWall, match="security check"):
@@ -266,14 +289,27 @@ def test_note_templates_and_choice(session):
     templates = note_templates(session)
     found = make_job(session, title="Backend Developer", company="Acme Software", apply_type=ApplyType.easy_apply, status=JobStatus.found)
     note = build_note(templates, found, "Dr. Priya Sharma")
-    assert note.startswith("Hi Priya, I’m Harsh Vaghela") and "openings at Acme Software that match" in note
-    applied = make_job(session, apply_type=ApplyType.easy_apply, status=JobStatus.applied)
-    assert build_note(templates, applied, "Priya Sharma") == AFTER_EASY_APPLY
-    emailed = make_job(session, apply_type=ApplyType.email, status=JobStatus.applied, company="LinkedIn post")
-    assert "openings at your company" in build_note(templates, emailed, "Priya Sharma")  # not "Easy Apply"
+    assert note.startswith("Hi Priya, I’m Harsh Vaghela") and "the Backend Developer opening at Acme Software that matches" in note
+    applied = make_job(session, title="Java Developer", company="Acme Software", apply_type=ApplyType.easy_apply,
+                       status=JobStatus.applied)
+    assert build_note(templates, applied, "Priya Sharma") == after_easy_apply("Java Developer", "Acme Software")
     assert len(note) <= 300
-    with pytest.raises(DraftProblem):
-        build_note([], found, "Priya")
+    # 2026-10-27: every note names the role and the company; without them the person is skipped.
+    emailed = make_job(session, title="Backend Developer (hiring post)", apply_type=ApplyType.email,
+                       status=JobStatus.applied, company="LinkedIn post")
+    with pytest.raises(MissingDetail):
+        build_note(templates, emailed, "Priya Sharma")
+    with pytest.raises(MissingDetail):
+        build_note(templates, None, "Priya Sharma")
+    # A long job title falls back to the matched role to fit in 300 characters.
+    long_title = make_job(session, title="Software Development Engineer II - Backend Platform (Java, Spring Boot, Kafka)",
+                          matched_role="Backend Engineer", company="Acme Software Private Limited",
+                          apply_type=ApplyType.easy_apply, status=JobStatus.applied)
+    assert build_note(templates, long_title, "Priya") == after_easy_apply("Backend Engineer", "Acme Software Private Limited")
+    # Templates without [Job title] and [Company] are never used.
+    plain = make_template(session, kind=TemplateKind.linkedin_message, question="Old note", answer="Hi [Name], please consider me.")
+    with pytest.raises(DraftProblem, match=r"both \[Job title\] and \[Company\]"):
+        build_note([plain], found, "Priya")
 
 
 # ---------------------------------------------------------------------------
@@ -351,9 +387,10 @@ def test_sends_notes_to_post_authors_and_the_hiring_team(client, fake_browser):
     visited = [url for url in fake_browser.visited if "/in/" in url or "/jobs/view/" in url]
     assert visited == [team_url, PRIYA, rahul, anita], visited  # the job page first, then the profiles
     assert all(p.sent for p in profiles.values())
-    assert profiles[PRIYA].note.startswith("Hi Priya, I’m Harsh Vaghela") and "openings at Acme Corp" in profiles[PRIYA].note
-    assert profiles[rahul].note == AFTER_EASY_APPLY  # applied with Easy Apply
-    assert profiles[anita].note.startswith("Hi Anita,") and "openings at Acme Software" in profiles[anita].note
+    assert profiles[PRIYA].note.startswith("Hi Priya, I’m Harsh Vaghela")
+    assert "the Backend Developer opening at Acme Corp" in profiles[PRIYA].note  # not "(hiring post)"
+    assert profiles[rahul].note == after_easy_apply("Backend Developer", "Acme Software")  # applied with Easy Apply
+    assert profiles[anita].note.startswith("Hi Anita,") and "the Backend Developer opening at Acme Software" in profiles[anita].note
     assert sender.pauses == [60.0, 60.0]  # between notes only
     with Session(engine) as session:
         rows = session.exec(
@@ -376,6 +413,32 @@ def test_sends_notes_to_post_authors_and_the_hiring_team(client, fake_browser):
     again = outreach().run(make_ctx(client.app))
     assert (again.status, again.message) == (ScanStatus.ok, "No new people to send a connection note to.")
     assert fake_browser.visited == []
+
+
+def test_only_jobs_in_bengaluru_or_remote_india(client, fake_browser):
+    """2026-10-27: notes had reached recruiters hiring only in Vietnam or Indonesia for "Remote" jobs."""
+    connect_linkedin(client.app, fake_browser)
+    engine = client.app.state.engine
+    india = "https://www.linkedin.com/in/india-remote/"
+    with Session(engine) as session:
+        set_flag(session, AUTO_SEND_LINKEDIN_NOTES, True)
+        seed_templates(session)
+        li_job(session, 1, priority=0, location="Remote", contact_name="Abroad Person",
+               contact_profile_url="https://www.linkedin.com/in/abroad/")
+        li_job(session, 2, priority=1, location="Chennai, Tamil Nadu, India (On-site)", contact_name="Other City",
+               contact_profile_url="https://www.linkedin.com/in/other-city/")
+        li_job(session, 3, priority=2, location="Remote")  # its job page isn't even opened
+        li_job(session, 4, priority=3, location="India (Remote)", contact_name="India Remote", contact_profile_url=india)
+        li_job(session, 5, priority=4, company="LinkedIn post", title="Backend Developer (hiring post)",
+               url="https://www.linkedin.com/feed/update/urn:li:activity:5/", contact_name="No Company",
+               contact_profile_url="https://www.linkedin.com/in/no-company/")
+    profile = FakeProfile(name="India Remote")
+    fake_browser.forms.append(("/in/india-remote/", profile))
+    outcome = outreach().run(make_ctx(client.app))
+    assert outcome.new == 1 and profile.sent
+    assert "the Backend Developer opening at Acme Software" in profile.note
+    assert outcome.message == "Sent 1 connection note, 1 skipped (role or company not known)."
+    assert [url for url in fake_browser.visited if "/in/" in url or "/jobs/view/" in url] == [india]
 
 
 def test_caps_skips_and_long_notes(client, fake_browser):
@@ -505,7 +568,7 @@ def test_test_note_endpoint(client, fake_browser):
     assert dry.status_code == 200
     body = dry.json()
     assert body["result"] == "would_send" and body["profile_url"] == PRIYA and body["name"] == "Priya Sharma"
-    assert body["note"].startswith("Hi Priya, I’m Harsh Vaghela") and "openings at Acme Corp" in body["note"]
+    assert body["note"].startswith("Hi Priya, I’m Harsh Vaghela") and "the Backend Developer opening at Acme Corp" in body["note"]
     assert {"Invite Priya Sharma to connect", "Add a note", "Send invitation"} <= set(body["buttons_found"])
     assert not profile.sent and "Send invitation" not in profile.clicks
     assert client.get("/api/outreach").json()["total"] == 0  # a dry run records nothing

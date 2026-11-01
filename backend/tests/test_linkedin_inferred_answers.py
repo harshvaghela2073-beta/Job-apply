@@ -91,6 +91,7 @@ def test_plain_numbers_and_unrelated_answers_are_kept_on_an_error():
     answers = book()
     field = FormField(id="1", label="How many years of experience do you have with Java?", type="text", required=True,
                       error="Invalid input")
-    assert answers.answer(field).value == "1.9"
+    # A rejected decimal is tried as the nearest whole number (2026-10-28).
+    assert answers.answer(field).value == "2"
     url = FormField(id="2", label="LinkedIn Profile URL", type="text", required=True, error="Invalid input")
     assert answers.answer(url).value == "https://www.linkedin.com/in/someone/"

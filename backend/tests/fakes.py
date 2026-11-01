@@ -467,7 +467,9 @@ class FakeProfile:
     Clicking Connect does ``on_connect``: ``"dialog"`` (Add a note / Send without a note),
     ``"weekly_limit"``, ``"email"`` (LinkedIn wants their email) or ``"instant"`` (sent at once).
     "Add a note" does ``on_add_note``: ``"box"`` or ``"note_limit"`` (Premium offer). "Send" does
-    ``on_send``: ``"sent"``, ``"weekly_limit"``, ``"error"`` or ``"nothing"``. A "People also
+    ``on_send``: ``"sent"``, ``"quiet"`` (sent; the dialog just closes, with no toast and no "Pending",
+like the 2026-10-15 invitation page), ``"weekly_limit"``, ``"error"`` or ``"nothing"``. Every page
+carries LinkedIn's hidden translations ("Sorry, something went wrong"), which are no error. A "People also
     viewed" card has another person's Connect button, outside the top card. ``within`` scopes are
     honoured: the top card, the dialog, or (None) the whole page."""
 
@@ -491,7 +493,7 @@ class FakeProfile:
         self.state, self.toast = "page", ""
 
     def _top(self) -> list[str]:
-        if self.sent or self.connect == "pending":
+        if (self.sent and self.on_send != "quiet") or self.connect == "pending":
             return [f"Pending, click to withdraw invitation sent to {self.name}", "Message", "More actions"]
         buttons = {
             "primary": ["Message", f"Invite {self.name} to connect", "More actions"],
@@ -547,6 +549,8 @@ class FakeProfile:
             if self.on_send == "sent":
                 self.sent, self.state = True, "page"
                 self.toast = f"Your invitation to {self.name.split()[0]} was sent."
+            elif self.on_send == "quiet":
+                self.sent, self.state = True, "page"
             elif self.on_send == "weekly_limit":
                 self.state = "weekly_limit"
             elif self.on_send == "error":
@@ -592,7 +596,8 @@ class FakeProfile:
         if self.state in texts:
             dialog = f'<div role="dialog" class="artdeco-modal send-invite">{texts[self.state]}{buttons(self._dialog())}</div>'
         toast = f'<div class="artdeco-toast-item"><p>{self.toast}</p></div>' if self.toast else ""
-        return f"<html><body><main>{top}{aside}</main>{dialog}{toast}</body></html>"
+        hidden = '<code style="display: none">{"message":"Sorry, something went wrong. Click ‘Refine’ to try again."}</code>'
+        return f"<html><body><main>{top}{aside}</main>{dialog}{toast}{hidden}</body></html>"
 
 
 # ---------------------------------------------------------------------------

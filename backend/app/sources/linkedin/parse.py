@@ -14,6 +14,7 @@ from bs4 import Tag
 from app.browser.driver import PageResult
 from app.sources.html import first, select_any, soup, text_of, visible_text
 from app.sources.linkedin import selectors as S
+from app.sources.linkedin.hiring import is_seeker_headline
 
 _JOB_URN = re.compile(r"urn:li:jobPosting:(\d+)")
 _JOB_ID_IN_URL = re.compile(r"/jobs/view/(?:[^/?#]*?-)?(\d{6,})")
@@ -688,12 +689,55 @@ def find_form_links(*texts: str) -> list[str]:
     return links
 
 
+# Address endings that aren't a country code (2 letters) but are real (2026-10-23: "node@wall.counter"
+# came from code in a post). Longest first, to trim words glued on ("gmail.comsubject" -> "gmail.com").
+_GENERIC_TLDS = (
+    "solutions", "technology", "consulting", "careers", "software", "services", "digital", "systems", "company",
+    "network", "academy", "agency", "global", "online", "studio", "ventures", "website", "capital", "finance",
+    "health", "media", "group", "cloud", "world", "store", "space", "email", "tech", "info", "jobs", "team",
+    "life", "live", "work", "site", "shop", "labs", "page", "link", "news", "blog", "club", "today", "design",
+    "school", "inc", "ltd", "com", "org", "net", "edu", "gov", "biz", "xyz", "app", "dev", "pro", "one",
+)
+# 2-letter endings used as generic names, not as a country.
+_GENERIC_CC = ("co", "io", "ai", "me", "tv", "cc", "gg", "so", "ly", "to", "ws")
+_LOCAL_PREFIX = re.compile(r"^(?:contact|email|e-mail|mail|mailto|reach|write|send|id)[-:_.]+(?=[a-z0-9])")
+
+
+def clean_email(raw: str) -> str | None:
+    """A usable address from what the post text gave, or None: "contact-priya@acme.com" -> the address
+    after "contact-"; "hr@acme.comsubject" -> "hr@acme.com"; "node@wall.counter" -> None."""
+    email = raw.strip().rstrip(".").lower()
+    if email.endswith(_NOT_EMAIL_SUFFIXES):
+        return None
+    local, _, domain = email.partition("@")
+    trimmed = _LOCAL_PREFIX.sub("", local)
+    if trimmed != local and len(trimmed) >= 3:
+        local = trimmed
+    labels = domain.split(".")
+    last = labels[-1]
+    if not (len(last) == 2 or last in _GENERIC_TLDS):
+        glued = next((tld for tld in _GENERIC_TLDS + ("in",) if last.startswith(tld)), None)
+        if glued is None:
+            return None
+        labels[-1] = glued
+    if len(labels) < 2 or not local:
+        return None
+    return f"{local}@{'.'.join(labels)}"
+
+
+def foreign_email(email: str) -> bool:
+    """The address belongs to a company in another country (".co.id", ".ae", ".com.au", ...); generic
+    endings (.com, .io, .ai, .co) and India (.in) aren't foreign."""
+    last = email.rsplit(".", 1)[-1].lower()
+    return len(last) == 2 and last != "in" and last not in _GENERIC_CC
+
+
 def find_emails(*texts: str) -> list[str]:
     emails: list[str] = []
     for text in texts:
         for match in _EMAIL.finditer(text or ""):
-            email = match.group().rstrip(".").lower()
-            if email.endswith(_NOT_EMAIL_SUFFIXES) or email in emails:
+            email = clean_email(match.group())
+            if email is None or email in emails:
                 continue
             emails.append(email)
     return emails
@@ -833,11 +877,11 @@ def parse_hiring_team(html: str) -> list[HiringPerson]:
 
 def pick_contact(people: list[HiringPerson | dict]) -> HiringPerson | None:
     """The person to write to: the first one (the job poster comes first) who isn't a 1st-degree
-    connection already."""
+    connection already and whose headline isn't a job seeker's."""
     for person in people:
         if isinstance(person, dict):
             person = HiringPerson(**person)
-        if person.degree != "1st" and person.profile_url:
+        if person.degree != "1st" and person.profile_url and not is_seeker_headline(person.headline):
             return person
     return None
 
@@ -946,5 +990,6 @@ def read_profile(html: str, slug: str | None = None) -> ProfileView:
     view.weekly_limit = any(t in page_text for t in S.WEEKLY_LIMIT_TEXT)
     view.note_limit = any(t in dialog_text for t in S.NOTE_LIMIT_TEXT)
     view.email_required = any(t in dialog_text for t in S.EMAIL_REQUIRED_TEXT)
-    view.error = next((t for t in S.INVITE_ERROR_TEXT if t in page_text), "")
+    toast_text = " ".join(text_of(node) for selector in S.INVITE_TOAST for node in doc.select(selector)).lower()
+    view.error = next((t for t in S.INVITE_ERROR_TEXT if t in f"{dialog_text} {toast_text}"), "")
     return view

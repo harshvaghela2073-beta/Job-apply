@@ -2,21 +2,28 @@
 outreach"; decided by the candidate on 2026-10-14).
 
 **Who** (``LinkedInOutreach``, scan kind ``linkedin_outreach``, after ``email_send``, while the
-``auto_send_linkedin_notes`` switch is on): people found today, from
+``auto_send_linkedin_notes`` switch is on): only people hiring for one of the candidate's roles in
+Bengaluru or remote in India (``app.sources.linkedin.hiring``, 2026-10-27), for jobs found in the
+last ``OUTREACH_JOB_DAYS`` days, from
 
-1. "Meet the hiring team" on the LinkedIn job pages of jobs the tool stored today. A job page is
-   opened once (``Job.contact_checked_at``), at most ``JOB_PAGES_PER_RUN`` per run; Easy Apply also
-   records the team from the page it already has open.
-2. the authors of matching hiring posts (stored by ``linkedin_posts``).
+1. "Meet the hiring team" on the LinkedIn job pages of jobs in Bengaluru or remote in India. A job
+   page is opened once (``Job.contact_checked_at``), at most ``JOB_PAGES_PER_RUN`` per run; Easy
+   Apply also records the team from the page it already has open.
+2. the authors of hiring posts that ``linkedin_posts`` judged hiring (not a job seeker, a job alert
+   or a reshare; Bengaluru or remote in India; a hiring headline or "we're hiring"; company known).
 
 Each job keeps one person (``Job.contact_name`` / ``contact_profile_url``): the job poster first,
-never a 1st-degree connection. Jobs that were skipped or failed are left out.
+never a 1st-degree connection or someone whose headline says they're looking for a job. Jobs that
+were skipped or failed are left out.
 
-**The note:** a ``linkedin_message`` template (``app.services.outreach.choose_note_template``), with
-``[Name]`` (first name) and ``[Company]`` filled. Over 300 characters -> that person is skipped.
+**The note:** a ``linkedin_message`` template with both ``[Job title]`` and ``[Company]``
+(``build_note``), with ``[Name]`` (first name) filled too. A job whose role or company isn't known
+is skipped. Over 300 characters with every template -> that person is skipped.
 
 **Sending** (``send_connection_note``), from the person's profile: Connect (or More -> Connect) ->
-"Add a note" -> fill -> Send; success is the "Invitation sent" toast or "Pending" on the profile.
+"Add a note" -> fill -> Send; success is the "Invitation sent" toast, "Pending" on the profile, or
+the dialog closing with no error (the invitation page of the 2026-10-15 layout shows neither).
+Errors are read from the dialog and LinkedIn's toasts only, never the whole page.
 
 - No Connect (already connected, pending, follow-only), or LinkedIn wants their email: skipped,
   recorded as ``failed`` with the reason so the profile isn't visited again.
@@ -69,16 +76,22 @@ from app.scanner.base import LoginWall, Pacer, ScanBlocked, ScanContext, ScanOut
 from app.services.app_settings import AUTO_SEND_LINKEDIN_NOTES, get_flag
 from app.services.outreach import (
     DraftProblem,
+    MissingDetail,
+    applied_with_easy_apply,
     choose_note_template,
     clean_job_title,
     fill_placeholders,
     first_name,
+    is_hiring_post,
     known_company,
+    mentions_easy_apply,
+    names_role_and_company,
     note_templates,
     ready_text,
     sent_this_month,
     sent_today,
 )
+from app.sources.linkedin.hiring import team_outreach_problem
 from app.sources.linkedin import selectors as S
 from app.sources.linkedin.easy_apply import LOGIN_EXPIRED, SECURITY_CHECK, check_job_page
 from app.sources.linkedin.login import LINKEDIN_LOGIN
@@ -102,6 +115,7 @@ JOB_PAGES_PER_RUN = 6
 MAX_FAILED_IN_A_ROW = 2
 DIALOG_WAIT_SECONDS = 8
 CONFIRM_TIMEOUT_SECONDS = 12
+SEND_SETTLE_SECONDS = 3  # no error this long after the dialog closed: sent
 LIMIT_PAUSE = timedelta(hours=24)
 LOCAL_TZ = ZoneInfo("Asia/Kolkata")
 # Statuses of jobs whose people get a note (not skipped by the rules, not failed).
@@ -339,6 +353,7 @@ def send_connection_note(
         return attempt(NoteResult.failed, "The Send button couldn't be clicked; nothing was sent." + note_text)
 
     waited = 0.0
+    closed = 0.0  # seconds since the invitation dialog closed
     while waited < CONFIRM_TIMEOUT_SECONDS:
         browser.wait(1.0)
         waited += 1.0
@@ -352,6 +367,12 @@ def send_connection_note(
             return attempt(NoteResult.failed, f'LinkedIn said "{view.error}" after Send.', clicked=True)
         if (view.sent and not sent_before) or view.pending:
             return attempt(NoteResult.sent, "Sent the connection request with the note.", clicked=True)
+        if not (view.dialog or view.note_box):
+            # The invitation page (2026-10-15 layout) shows no toast and no "Pending": the dialog closing
+            # with no error after a short wait is the confirmation (replies to these notes came back).
+            closed += 1.0
+            if closed >= SEND_SETTLE_SECONDS:
+                return attempt(NoteResult.sent, "Sent the connection request with the note (the dialog closed).", clicked=True)
     note_text = capture_failure(browser, kind)
     return attempt(NoteResult.failed, "Clicked Send but LinkedIn showed no confirmation." + note_text, clicked=True)
 
@@ -382,25 +403,46 @@ class JobInfo:
     status: JobStatus
     contact_name: str | None = None
     contact_profile_url: str | None = None
+    matched_role: str | None = None
+    location: str = ""
 
     @classmethod
     def of(cls, job: Job) -> "JobInfo":
         return cls(
             job.id, job.title, job.company, job.url, ApplyType(job.apply_type), JobStatus(job.status),
-            job.contact_name, job.contact_profile_url,
+            job.contact_name, job.contact_profile_url, job.matched_role, job.location or "",
         )
 
 
 def build_note(templates: list[Template], job: JobInfo | Job | None, name: str | None) -> str:
-    """The connection note for ``name`` about ``job``. Raises ``DraftProblem`` when there is no
-    template or a placeholder is left; may be over 300 characters (the caller checks)."""
-    template = choose_note_template(templates, job)
+    """The connection note for ``name`` about ``job``, naming its role and company (2026-10-27). Only
+    templates with both ``[Job title]`` and ``[Company]`` are used: the chosen one first, then the
+    others, each with the job's title and then its shorter matched role, until one fits in 300
+    characters (else the first is returned and the caller skips it). Raises ``MissingDetail`` when
+    the role or company isn't known, ``DraftProblem`` when no template names both or a placeholder is
+    left."""
+    usable = [t for t in templates if names_role_and_company(t)]
+    template = choose_note_template(usable, job)
     if template is None:
-        raise DraftProblem("There is no LinkedIn message template for connection notes")
+        raise DraftProblem("No connection-note template has both [Job title] and [Company]")
     company = known_company(job.company, job.contact_name) if job is not None else None
-    title = clean_job_title(job.title) if job is not None else None
-    text = fill_placeholders(template.answer, job_title=title, company=company, name=first_name(name))
-    return ready_text(" ".join(text.split()), f'template "{template.question}"')
+    titles = []
+    for title in (clean_job_title(job.title), clean_job_title(job.matched_role)) if job is not None else ():
+        if title and title not in titles:
+            titles.append(title)
+    if not company or not titles:
+        raise MissingDetail("The job's role or company isn't known")
+    easy_apply_ok = applied_with_easy_apply(job)
+    order = [template] + [t for t in usable if t is not template and (easy_apply_ok or not mentions_easy_apply(t))]
+    notes = []
+    for candidate in order:
+        for title in titles:
+            text = fill_placeholders(candidate.answer, job_title=title, company=company, name=first_name(name))
+            text = ready_text(" ".join(text.split()), f'template "{candidate.question}"')
+            if len(text) <= CONNECTION_NOTE_MAX_CHARS:
+                return text
+            notes.append(text)
+    return notes[0]
 
 
 # Until this moment every "no Connect button" came from LinkedIn's new profile layout, which the tool
@@ -602,6 +644,9 @@ class LinkedInOutreach:
                 return
             try:
                 note = build_note(templates, job, name)
+            except MissingDetail:
+                skipped["role or company not known"] = skipped.get("role or company not known", 0) + 1
+                return
             except DraftProblem as error:
                 if str(error) not in problems:
                     problems.append(str(error))
@@ -612,6 +657,9 @@ class LinkedInOutreach:
                 return
             targets.append(_Target(url, name or "", job, note))
 
+        # Only jobs in Bengaluru or remote in India (2026-10-27); a hiring post's author was checked
+        # when the post was read (hiring.py), so posts keep only authors who may be written to.
+        jobs = [job for job in jobs if is_hiring_post(job.title) or team_outreach_problem(job.location, None) is None]
         for job in jobs:
             if job.contact_profile_url:
                 add_target(job.contact_profile_url, job.contact_name, job)

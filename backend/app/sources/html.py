@@ -35,11 +35,19 @@ def text_of(node: Tag | None) -> str:
     return " ".join(node.get_text(" ", strip=True).split())
 
 
+_HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.I)
+
+
 def visible_text(html: str) -> str:
-    """Page text without scripts and styles, whitespace collapsed."""
+    """Page text without scripts, styles and hidden elements, whitespace collapsed. LinkedIn keeps its
+    translations in ``<code style="display: none">`` blobs ("Sorry, something went wrong ..."), which
+    were taken for an error after every connection note until 2026-10-27."""
     doc = soup(html)
     for tag in doc(["script", "style", "noscript", "template"]):
         tag.decompose()
+    for tag in doc.find_all(lambda t: t.has_attr("hidden") or _HIDDEN_STYLE.search(t.get("style") or "")):
+        if not tag.decomposed:
+            tag.decompose()
     return " ".join(doc.get_text(" ", strip=True).split())
 
 

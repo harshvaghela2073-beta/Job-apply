@@ -488,6 +488,9 @@ def walk_form(browser: BrowserSession, answers: AnswerBook, *, dry_run: bool, ki
             if is_follow_company(f):
                 follow = f
                 continue
+            if not f.error and f.value.strip() and filled.get(_control(f)) == f.value.strip():
+                # Accepted as filled (maybe "2" after "1.9" was rejected): never typed over again.
+                continue
             answer = answers.answer(f)
             if answer.value is None and f.value.strip() and not f.error and f.value.strip().lower() != "select an option":
                 # LinkedIn prefilled it from your account (e.g. the account's email): keep that.
